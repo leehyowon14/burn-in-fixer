@@ -1,13 +1,17 @@
 R_DEF: Internal format may change without notice
 local
+id btnColorCalibrate
 id btnConnect
+id btnConnectReference
 id btnMeasure
 id btnStart
 id btnToggle
 id editIp
+id editReferenceIp
 id preview
 id scrollLog
 id txtLog
+id txtReference
 id txtResult
 id txtStatus
 id txtTarget

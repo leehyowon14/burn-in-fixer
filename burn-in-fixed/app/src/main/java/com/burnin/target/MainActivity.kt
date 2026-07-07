@@ -14,6 +14,7 @@ import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import com.burnin.target.correction.CorrectionStore
+import com.burnin.target.correction.WhiteBalanceStore
 import com.burnin.target.net.ControlServer
 import com.burnin.target.net.Protocol
 import com.burnin.target.overlay.OverlayService
@@ -34,6 +35,7 @@ class MainActivity : Activity() {
     private lateinit var txtIp: TextView
     private lateinit var txtStatus: TextView
     private lateinit var txtProfile: TextView
+    private lateinit var txtRole: TextView
     private lateinit var txtLog: TextView
     private lateinit var scrollLog: ScrollView
 
@@ -51,9 +53,16 @@ class MainActivity : Activity() {
         txtIp = findViewById(R.id.txtIp)
         txtStatus = findViewById(R.id.txtStatus)
         txtProfile = findViewById(R.id.txtProfile)
+        txtRole = findViewById(R.id.txtRole)
         txtLog = findViewById(R.id.txtLog)
         scrollLog = findViewById(R.id.scrollLog)
 
+        findViewById<Button>(R.id.btnRoleAdjustment).setOnClickListener {
+            setRole(Protocol.ROLE_ADJUSTMENT)
+        }
+        findViewById<Button>(R.id.btnRoleReference).setOnClickListener {
+            setRole(Protocol.ROLE_REFERENCE)
+        }
         findViewById<Button>(R.id.btnPattern).setOnClickListener {
             startActivity(Intent(this, PatternActivity::class.java))
         }
@@ -81,6 +90,7 @@ class MainActivity : Activity() {
         }
 
         CorrectionStore.loadFromDisk(this)
+        WhiteBalanceStore.loadFromDisk(this)
         ControlServer.start(this)
         showDisclaimerOnce()
         AppLog.i("대상 기기 앱 시작")
@@ -103,9 +113,11 @@ class MainActivity : Activity() {
     }
 
     private fun refreshStatus() {
+        val role = DeviceRole.get(this)
         val ip = NetUtils.localIpv4()
         txtIp.text = if (ip != null) "이 기기 주소:  $ip : ${Protocol.PORT}"
         else "Wi-Fi 미연결 — 측정 기기와 같은 Wi-Fi에 연결하세요"
+        txtRole.text = "역할: ${DeviceRole.label(role)}"
 
         val client = ControlServer.clientAddress
         val screen = CorrectionStore.realScreenSize(this)
@@ -113,17 +125,36 @@ class MainActivity : Activity() {
             append("화면 ${screen.x}x${screen.y}")
             append("  |  측정 기기: ${client ?: "대기 중"}")
             append("  |  오버레이: ${if (OverlayService.running) "ON" else "OFF"}")
+            if (role == Protocol.ROLE_REFERENCE) append("  |  보정 잠금")
         }
 
         val m = CorrectionStore.meta
-        txtProfile.text = if (m == null) "보정 프로파일: 없음 (측정 기기에서 전송하세요)"
+        val wb = WhiteBalanceStore.meta
+        val correctionText = if (m == null) "보정 프로파일: 없음"
         else "보정 프로파일: ${m.width}x${m.height}, 최대 감쇠 ${(m.maxAttenuation * 100).toInt()}%, ${m.createdAt}"
+        val wbText = if (wb == null) "화이트밸런스: 없음"
+        else "화이트밸런스: R ${fmtGain(wb.redGain)}, G ${fmtGain(wb.greenGain)}, B ${fmtGain(wb.blueGain)}"
+        txtProfile.text = "$correctionText\n$wbText"
+    }
+
+    private fun setRole(role: String) {
+        DeviceRole.set(this, role)
+        if (role == Protocol.ROLE_REFERENCE) {
+            PatternBus.setCorrection(false, null)
+            OverlayService.requestStop(this)
+        }
+        AppLog.i("역할 설정: ${DeviceRole.label(role)}")
+        refreshStatus()
     }
 
     /** 회색 70% 패턴 + 보정 ON 상태로 패턴 화면을 열어 육안 비교(탭으로 전/후 토글). */
     private fun openPreview() {
-        if (CorrectionStore.bakedBitmap == null) {
-            AppLog.i("보정맵이 없어 미리보기 불가")
+        if (DeviceRole.isReference(this)) {
+            AppLog.i("대조설비는 보정 미리보기를 사용하지 않습니다")
+            return
+        }
+        if (CorrectionStore.bakedBitmap == null && WhiteBalanceStore.rgbAttenuationBitmap == null) {
+            AppLog.i("보정맵/화이트밸런스가 없어 미리보기 불가")
             return
         }
         PatternBus.setCorrection(true, null)
@@ -131,6 +162,10 @@ class MainActivity : Activity() {
     }
 
     private fun enableOverlay() {
+        if (DeviceRole.isReference(this)) {
+            AppLog.i("대조설비는 오버레이를 켤 수 없습니다")
+            return
+        }
         if (!Settings.canDrawOverlays(this)) {
             AlertDialog.Builder(this)
                 .setTitle("오버레이 권한 필요")
@@ -147,6 +182,9 @@ class MainActivity : Activity() {
         val error = OverlayService.requestStart(this, findViewById<SeekBar>(R.id.seekStrength).progress)
         if (error != null) AppLog.i("오버레이 시작 실패: $error")
     }
+
+    private fun fmtGain(v: Double): String =
+        String.format(java.util.Locale.US, "%.3f", v)
 
     private fun showDisclaimerOnce() {
         val prefs = getSharedPreferences("app", MODE_PRIVATE)

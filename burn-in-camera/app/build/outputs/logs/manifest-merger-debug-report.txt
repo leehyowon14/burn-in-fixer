@@ -1,9 +1,9 @@
 -- Merging decision tree log ---
 manifest
-ADDED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:2:1-31:12
-INJECTED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:2:1-31:12
-INJECTED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:2:1-31:12
-INJECTED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:2:1-31:12
+ADDED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:2:1-37:12
+INJECTED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:2:1-37:12
+INJECTED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:2:1-37:12
+INJECTED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:2:1-37:12
 	package
 		INJECTED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml
 	android:versionName
@@ -31,8 +31,8 @@ ADDED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/bur
 	android:name
 		ADDED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:8:19-57
 application
-ADDED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:10:5-30:19
-INJECTED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:10:5-30:19
+ADDED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:10:5-36:19
+INJECTED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:10:5-36:19
 	android:extractNativeLibs
 		INJECTED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml
 	android:label
@@ -69,6 +69,16 @@ ADDED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/bur
 		ADDED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:29:13-74
 	android:name
 		ADDED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:26:13-56
+activity#com.burnin.scanner.color.ColorCalibrationActivity
+ADDED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:31:9-35:77
+	android:screenOrientation
+		ADDED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:34:13-49
+	android:exported
+		ADDED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:33:13-37
+	android:configChanges
+		ADDED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:35:13-74
+	android:name
+		ADDED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml:32:13-59
 uses-sdk
 INJECTED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml reason: use-sdk injection requested
 INJECTED from /Users/gim-uhyeon/Documents/projectfolder/2025-2026/burn-in-fixer/burn-in-camera/app/src/main/AndroidManifest.xml

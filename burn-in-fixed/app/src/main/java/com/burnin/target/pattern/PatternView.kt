@@ -44,6 +44,20 @@ class PatternView(context: Context) : View(context) {
             invalidate()
         }
 
+    var whiteBalanceRgbBitmap: Bitmap? = null
+        set(value) {
+            field = value
+            clearSolidCache()
+            invalidate()
+        }
+
+    var whiteBalanceMaxAttenuation: Double = 0.10
+        set(value) {
+            field = value
+            clearSolidCache()
+            invalidate()
+        }
+
     var correctionEnabled: Boolean = false
         set(value) {
             field = value
@@ -69,17 +83,21 @@ class PatternView(context: Context) : View(context) {
     private var solidCacheH: Int = 0
     private var solidCacheStrength: Int = -1
     private var solidCacheRgb: Bitmap? = null
+    private var solidCacheWhiteBalanceRgb: Bitmap? = null
+    private var solidCacheCorrectionMaxAttenuation: Double = -1.0
+    private var solidCacheWhiteBalanceMaxAttenuation: Double = -1.0
 
     override fun onDraw(canvas: Canvas) {
         val w = width
         val h = height
-        var usedRgbSolid = false
+        var usedCorrectionRgbSolid = false
         when (spec.kind) {
             PatternSpec.Kind.SOLID -> {
                 val rgb = correctionRgbBitmap
-                if (correctionEnabled && rgb != null) {
-                    canvas.drawBitmap(correctedSolidBitmap(spec.color, w, h, rgb), 0f, 0f, null)
-                    usedRgbSolid = true
+                val wb = whiteBalanceRgbBitmap
+                if (correctionEnabled && (rgb != null || wb != null)) {
+                    canvas.drawBitmap(correctedSolidBitmap(spec.color, w, h, rgb, wb), 0f, 0f, null)
+                    usedCorrectionRgbSolid = rgb != null
                 } else {
                     canvas.drawColor(spec.color)
                 }
@@ -128,7 +146,7 @@ class PatternView(context: Context) : View(context) {
         }
 
         val bmp = correctionBitmap
-        if (correctionEnabled && bmp != null && spec.name != "marker" && !usedRgbSolid) {
+        if (correctionEnabled && bmp != null && spec.name != "marker" && !usedCorrectionRgbSolid) {
             srcRect.set(0, 0, bmp.width, bmp.height)
             dstRect.set(0, 0, w, h)
             mapPaint.alpha = strengthPct * 255 / 100
@@ -170,34 +188,61 @@ class PatternView(context: Context) : View(context) {
         }
     }
 
-    private fun correctedSolidBitmap(color: Int, w: Int, h: Int, rgb: Bitmap): Bitmap {
+    private fun correctedSolidBitmap(
+        color: Int,
+        w: Int,
+        h: Int,
+        rgb: Bitmap?,
+        whiteBalanceRgb: Bitmap?,
+    ): Bitmap {
         solidCache?.let { cached ->
             if (
                 solidCacheColor == color &&
                 solidCacheW == w &&
                 solidCacheH == h &&
                 solidCacheStrength == strengthPct &&
-                solidCacheRgb === rgb
+                solidCacheRgb === rgb &&
+                solidCacheWhiteBalanceRgb === whiteBalanceRgb &&
+                solidCacheCorrectionMaxAttenuation == correctionMaxAttenuation &&
+                solidCacheWhiteBalanceMaxAttenuation == whiteBalanceMaxAttenuation
             ) {
                 return cached
             }
         }
         clearSolidCache()
-        val map = if (rgb.width == w && rgb.height == h) rgb else Bitmap.createScaledBitmap(rgb, w, h, true)
-        val att = IntArray(w * h)
-        map.getPixels(att, 0, w, 0, 0, w, h)
-        if (map !== rgb) map.recycle()
+        val correctionMap = scaledMap(rgb, w, h)
+        val whiteBalanceMap = scaledMap(whiteBalanceRgb, w, h)
+        val correctionAtt = correctionMap?.let {
+            IntArray(w * h).also { out -> it.getPixels(out, 0, w, 0, 0, w, h) }
+        }
+        val whiteBalanceAtt = whiteBalanceMap?.let {
+            IntArray(w * h).also { out -> it.getPixels(out, 0, w, 0, 0, w, h) }
+        }
+        if (correctionMap != null && correctionMap !== rgb) correctionMap.recycle()
+        if (whiteBalanceMap != null && whiteBalanceMap !== whiteBalanceRgb) whiteBalanceMap.recycle()
         val baseR = Color.red(color)
         val baseG = Color.green(color)
         val baseB = Color.blue(color)
         val strength = strengthPct / 100.0
-        val maxAtt = correctionMaxAttenuation
+        val correctionMaxAtt = correctionMaxAttenuation
+        val whiteBalanceMaxAtt = whiteBalanceMaxAttenuation
         val out = IntArray(w * h)
         for (i in out.indices) {
-            val p = att[i]
-            val rGain = 1.0 - (Color.red(p) / 255.0) * maxAtt * strength
-            val gGain = 1.0 - (Color.green(p) / 255.0) * maxAtt * strength
-            val bGain = 1.0 - (Color.blue(p) / 255.0) * maxAtt * strength
+            var rGain = 1.0
+            var gGain = 1.0
+            var bGain = 1.0
+            correctionAtt?.let { att ->
+                val p = att[i]
+                rGain *= 1.0 - (Color.red(p) / 255.0) * correctionMaxAtt * strength
+                gGain *= 1.0 - (Color.green(p) / 255.0) * correctionMaxAtt * strength
+                bGain *= 1.0 - (Color.blue(p) / 255.0) * correctionMaxAtt * strength
+            }
+            whiteBalanceAtt?.let { att ->
+                val p = att[i]
+                rGain *= 1.0 - (Color.red(p) / 255.0) * whiteBalanceMaxAtt * strength
+                gGain *= 1.0 - (Color.green(p) / 255.0) * whiteBalanceMaxAtt * strength
+                bGain *= 1.0 - (Color.blue(p) / 255.0) * whiteBalanceMaxAtt * strength
+            }
             val r = Math.round(baseR * rGain).toInt().coerceIn(0, 255)
             val g = Math.round(baseG * gGain).toInt().coerceIn(0, 255)
             val b = Math.round(baseB * bGain).toInt().coerceIn(0, 255)
@@ -210,13 +255,22 @@ class PatternView(context: Context) : View(context) {
         solidCacheH = h
         solidCacheStrength = strengthPct
         solidCacheRgb = rgb
+        solidCacheWhiteBalanceRgb = whiteBalanceRgb
+        solidCacheCorrectionMaxAttenuation = correctionMaxAttenuation
+        solidCacheWhiteBalanceMaxAttenuation = whiteBalanceMaxAttenuation
         return bmp
+    }
+
+    private fun scaledMap(src: Bitmap?, w: Int, h: Int): Bitmap? {
+        if (src == null) return null
+        return if (src.width == w && src.height == h) src else Bitmap.createScaledBitmap(src, w, h, true)
     }
 
     private fun clearSolidCache() {
         solidCache?.recycle()
         solidCache = null
         solidCacheRgb = null
+        solidCacheWhiteBalanceRgb = null
     }
 
     override fun onDetachedFromWindow() {

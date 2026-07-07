@@ -9,7 +9,14 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:textSize="14sp"
-        android:text="대상 기기(보정앱)에 표시된 IP를 입력하고 연결하세요. 두 기기는 같은 Wi-Fi에 있어야 합니다." />
+        android:text="조정설비와 대조설비에 표시된 IP를 입력하고 연결하세요. 세 기기는 같은 Wi-Fi에 있어야 합니다." />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:textStyle="bold"
+        android:text="조정설비" />
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -22,7 +29,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:hint="예: 192.168.0.23"
+            android:hint="조정설비 IP"
             android:inputType="text"
             android:imeOptions="actionDone" />
 
@@ -41,6 +48,43 @@
         android:textSize="14sp"
         android:text="대상 기기: 미연결" />
 
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:textStyle="bold"
+        android:text="대조설비" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal">
+
+        <EditText
+            android:id="@+id/editReferenceIp"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="대조설비 IP"
+            android:inputType="text"
+            android:imeOptions="actionDone" />
+
+        <Button
+            android:id="@+id/btnConnectReference"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="연결" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/txtReference"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:textSize="14sp"
+        android:text="대조설비: 미연결" />
+
     <Button
         android:id="@+id/btnMeasure"
         android:layout_width="match_parent"
@@ -48,6 +92,14 @@
         android:layout_marginTop="8dp"
         android:enabled="false"
         android:text="측정 시작 (암실 박스에 거치 후)" />
+
+    <Button
+        android:id="@+id/btnColorCalibrate"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:enabled="false"
+        android:text="화이트밸런스 캘리브레이션" />
 
     <TextView
         android:layout_width="match_parent"

@@ -37,6 +37,11 @@
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:exported="false"
             android:screenOrientation="portrait" />
+        <activity
+            android:name="com.burnin.scanner.color.ColorCalibrationActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"
+            android:screenOrientation="portrait" />
     </application>
 
 </manifest>

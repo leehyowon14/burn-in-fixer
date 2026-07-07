@@ -74,7 +74,13 @@ class ControlClient(private val host: String, private val port: Int = Protocol.P
 /** 화면 간 공유 연결 상태 (MainActivity → MeasurementActivity). */
 object Session {
     var client: ControlClient? = null
+    var referenceClient: ControlClient? = null
     var screenWidth: Int = 0
     var screenHeight: Int = 0
     var targetName: String = ""
+    var targetRole: String = Protocol.ROLE_ADJUSTMENT
+    var referenceScreenWidth: Int = 0
+    var referenceScreenHeight: Int = 0
+    var referenceName: String = ""
+    var referenceRole: String = Protocol.ROLE_REFERENCE
 }

@@ -3,7 +3,9 @@ package com.burnin.target.net
 import android.content.Context
 import android.graphics.Point
 import android.os.Build
+import com.burnin.target.DeviceRole
 import com.burnin.target.correction.CorrectionStore
+import com.burnin.target.correction.WhiteBalanceStore
 import com.burnin.target.overlay.OverlayService
 import com.burnin.target.pattern.PatternBus
 import com.burnin.target.pattern.PatternSpec
@@ -82,10 +84,13 @@ object ControlServer {
         val context = appContext ?: return err("HELLO", "컨텍스트 없음")
         val cmd = msg.optString("cmd")
         val reply = JSONObject().put("ok", true).put("cmd", cmd)
+        val role = DeviceRole.get(context)
 
         when (cmd) {
             Protocol.CMD_HELLO, Protocol.CMD_SCREEN_INFO -> {
                 val p: Point = CorrectionStore.realScreenSize(context)
+                reply.put("role", role)
+                reply.put("roleLabel", DeviceRole.label(role))
                 reply.put("device", JSONObject()
                     .put("manufacturer", Build.MANUFACTURER)
                     .put("model", Build.MODEL)
@@ -98,13 +103,26 @@ object ControlServer {
                     .put("loaded", m != null)
                     .put("width", m?.width ?: 0)
                     .put("height", m?.height ?: 0))
-                if (cmd == Protocol.CMD_HELLO) AppLog.i("HELLO 수신 (화면 ${p.x}x${p.y})")
+                val wb = WhiteBalanceStore.meta
+                reply.put("whiteBalance", JSONObject()
+                    .put("loaded", wb != null)
+                    .put("width", wb?.width ?: 0)
+                    .put("height", wb?.height ?: 0)
+                    .put("redGain", wb?.redGain ?: 1.0)
+                    .put("greenGain", wb?.greenGain ?: 1.0)
+                    .put("blueGain", wb?.blueGain ?: 1.0))
+                if (cmd == Protocol.CMD_HELLO) {
+                    AppLog.i("HELLO 수신 (${DeviceRole.label(role)}, 화면 ${p.x}x${p.y})")
+                }
             }
 
             Protocol.CMD_SHOW_PATTERN -> {
                 val name = msg.optString("pattern")
                 val spec = PatternSpec.parse(name)
                     ?: return err(cmd, "알 수 없는 패턴: $name")
+                if (role == Protocol.ROLE_REFERENCE) {
+                    PatternBus.setCorrection(false, null)
+                }
                 val latch = CountDownLatch(1)
                 PatternBus.showPattern(context, spec) { latch.countDown() }
                 val applied = latch.await(7, TimeUnit.SECONDS)
@@ -114,6 +132,9 @@ object ControlServer {
             }
 
             Protocol.CMD_APPLY_MAP -> {
+                if (role == Protocol.ROLE_REFERENCE) {
+                    return err(cmd, "대조설비는 보정맵을 적용하지 않습니다")
+                }
                 val error = CorrectionStore.applyFromBase64(
                     context = context,
                     width = msg.getInt("width"),
@@ -132,8 +153,48 @@ object ControlServer {
                 }
             }
 
+            Protocol.CMD_APPLY_WHITE_BALANCE -> {
+                if (role == Protocol.ROLE_REFERENCE) {
+                    return err(cmd, "대조설비는 화이트밸런스를 적용하지 않습니다")
+                }
+                val error = WhiteBalanceStore.applyFromBase64(
+                    context = context,
+                    width = msg.getInt("width"),
+                    height = msg.getInt("height"),
+                    maxAttenuation = msg.optDouble("maxAttenuation", 0.10),
+                    checksumMd5 = msg.optString("checksumMd5", ""),
+                    dataBase64 = msg.getString("data"),
+                    sourceDevice = msg.optString("sourceDevice", "scanner"),
+                    redGain = msg.optDouble("redGain", 1.0),
+                    greenGain = msg.optDouble("greenGain", 1.0),
+                    blueGain = msg.optDouble("blueGain", 1.0),
+                )
+                if (error != null) {
+                    AppLog.i("화이트밸런스 거부: $error")
+                    return err(cmd, error)
+                }
+                PatternBus.setCorrection(true, msg.optInt("strength", 100))
+                AppLog.i("화이트밸런스 적용")
+            }
+
+            Protocol.CMD_CLEAR_WHITE_BALANCE -> {
+                if (role == Protocol.ROLE_REFERENCE) {
+                    return err(cmd, "대조설비는 화이트밸런스를 사용하지 않습니다")
+                }
+                WhiteBalanceStore.clear(context)
+                PatternBus.setCorrection(PatternBus.correctionEnabled, null)
+            }
+
             Protocol.CMD_ENABLE_CORRECTION -> {
-                if (CorrectionStore.bakedBitmap == null) return err(cmd, "적재된 보정맵 없음")
+                if (role == Protocol.ROLE_REFERENCE) {
+                    return err(cmd, "대조설비는 보정을 켤 수 없습니다")
+                }
+                if (
+                    CorrectionStore.bakedBitmap == null &&
+                    WhiteBalanceStore.rgbAttenuationBitmap == null
+                ) {
+                    return err(cmd, "적재된 보정맵/화이트밸런스 없음")
+                }
                 PatternBus.setCorrection(true, msg.optInt("strength", 100))
                 AppLog.i("앱 내부 보정 ON (강도 ${PatternBus.strengthPct}%)")
             }
@@ -144,6 +205,9 @@ object ControlServer {
             }
 
             Protocol.CMD_ENABLE_OVERLAY -> {
+                if (role == Protocol.ROLE_REFERENCE) {
+                    return err(cmd, "대조설비는 오버레이를 켤 수 없습니다")
+                }
                 val error = OverlayService.requestStart(context, msg.optInt("strength", 100))
                 if (error != null) return err(cmd, error)
             }

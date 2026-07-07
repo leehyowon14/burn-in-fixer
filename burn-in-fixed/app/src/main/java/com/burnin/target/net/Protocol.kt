@@ -17,5 +17,10 @@ object Protocol {
     const val CMD_DISABLE_CORRECTION = "DISABLE_CORRECTION"
     const val CMD_ENABLE_OVERLAY = "ENABLE_OVERLAY"
     const val CMD_DISABLE_OVERLAY = "DISABLE_OVERLAY"
+    const val CMD_APPLY_WHITE_BALANCE = "APPLY_WHITE_BALANCE"
+    const val CMD_CLEAR_WHITE_BALANCE = "CLEAR_WHITE_BALANCE"
     const val CMD_END_SESSION = "END_SESSION"
+
+    const val ROLE_ADJUSTMENT = "adjustment"
+    const val ROLE_REFERENCE = "reference"
 }

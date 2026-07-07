@@ -5,7 +5,9 @@ import android.content.pm.ActivityInfo
 import android.os.Bundle
 import android.view.View
 import android.view.WindowManager
+import com.burnin.target.DeviceRole
 import com.burnin.target.correction.CorrectionStore
+import com.burnin.target.correction.WhiteBalanceStore
 import com.burnin.target.util.AppLog
 
 /**
@@ -35,7 +37,17 @@ class PatternActivity : Activity(), PatternBus.Host {
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
 
         view.setOnClickListener {
-            if (view.correctionBitmap != null || view.correctionRgbBitmap != null) {
+            if (DeviceRole.isReference(this)) {
+                PatternBus.correctionEnabled = false
+                applyCorrectionState()
+                AppLog.i("대조설비는 보정을 켜지 않습니다")
+                return@setOnClickListener
+            }
+            if (
+                view.correctionBitmap != null ||
+                view.correctionRgbBitmap != null ||
+                view.whiteBalanceRgbBitmap != null
+            ) {
                 PatternBus.correctionEnabled = !view.correctionEnabled
                 applyCorrectionState()
                 AppLog.i("탭 토글: 보정 ${if (view.correctionEnabled) "ON" else "OFF"}")
@@ -48,9 +60,14 @@ class PatternActivity : Activity(), PatternBus.Host {
         hideSystemUi()
         PatternBus.register(this)
         view.spec = PatternBus.currentSpec
+        if (DeviceRole.isReference(this)) {
+            PatternBus.correctionEnabled = false
+        }
         view.correctionBitmap = CorrectionStore.bakedBitmap
         view.correctionRgbBitmap = CorrectionStore.rgbAttenuationBitmap
         view.correctionMaxAttenuation = CorrectionStore.meta?.maxAttenuation ?: 0.05
+        view.whiteBalanceRgbBitmap = WhiteBalanceStore.rgbAttenuationBitmap
+        view.whiteBalanceMaxAttenuation = WhiteBalanceStore.meta?.maxAttenuation ?: 0.10
         applyCorrectionState()
     }
 
@@ -91,7 +108,9 @@ class PatternActivity : Activity(), PatternBus.Host {
         view.correctionBitmap = CorrectionStore.bakedBitmap
         view.correctionRgbBitmap = CorrectionStore.rgbAttenuationBitmap
         view.correctionMaxAttenuation = CorrectionStore.meta?.maxAttenuation ?: 0.05
-        view.correctionEnabled = PatternBus.correctionEnabled
+        view.whiteBalanceRgbBitmap = WhiteBalanceStore.rgbAttenuationBitmap
+        view.whiteBalanceMaxAttenuation = WhiteBalanceStore.meta?.maxAttenuation ?: 0.10
+        view.correctionEnabled = !DeviceRole.isReference(this) && PatternBus.correctionEnabled
         view.strengthPct = PatternBus.strengthPct
     }
 
