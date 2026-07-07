@@ -2,7 +2,7 @@ package com.burnin.target.pattern
 
 /**
  * 테스트 패턴 정의. 이름 규칙:
- *  - "black", "white70", "white85", "gray30"~"gray85", "red70", "green70", "blue70" : 단색
+ *  - "black", "white70", "white85", "gray25", "gray70", "red70", "green70", "blue70" : 단색
  *  - "marker"   : 좌표 정합용 마커 (모서리 사각형 + 방향 마커 + 중앙 십자)
  *  - "grid"     : 격자
  *  - "checker"  : 체커보드 (렌즈 왜곡 캘리브레이션용)

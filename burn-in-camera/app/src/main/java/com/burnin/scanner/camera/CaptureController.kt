@@ -10,9 +10,14 @@ import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
+import android.hardware.camera2.params.RggbChannelVector
+import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.Range
 import android.util.Size
 import android.view.Surface
 import android.view.TextureView
@@ -22,11 +27,27 @@ import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
+data class CaptureFrame(
+    val format: Int,
+    val width: Int,
+    val height: Int,
+    val planes: List<Plane>,
+    val timestampNs: Long,
+    val sensitivityIso: Int?,
+    val exposureTimeNs: Long?,
+) {
+    data class Plane(
+        val bytes: ByteArray,
+        val rowStride: Int,
+        val pixelStride: Int,
+    )
+}
+
 /**
  * Camera2 기반 측정 촬영 (M-FR-002/003/005의 MVP 구현).
- * - 후면 카메라, 지원 최대 스틸 해상도 JPEG 촬영
- * - 프리뷰로 AE를 수렴시킨 뒤 AE/AWB를 잠가 모든 패턴을 동일 노출로 촬영
- *   (풀 수동 ISO/셔터 제어는 후속 단계 — 잠금 방식은 LEGACY 기기에서도 대체로 동작)
+ * - 후면 카메라, YUV_420_888 우선 촬영(JPEG는 fallback)
+ * - 프리뷰 AE/AWB/AF 수렴 값을 읽은 뒤 가능하면 ISO/셔터/WB/포커스를 수동 고정
+ *   (MANUAL_SENSOR 미지원 기기는 AE/AWB lock fallback)
  * - 프레임 평균화를 위해 같은 패턴을 여러 장 연속 촬영
  */
 class CaptureController(context: Context, private val textureView: TextureView) {
@@ -45,11 +66,31 @@ class CaptureController(context: Context, private val textureView: TextureView) 
         private set
     lateinit var characteristics: CameraCharacteristics
         private set
+    lateinit var captureSize: Size
+        private set
     lateinit var jpegSize: Size
         private set
 
+    private var captureFormat: Int = ImageFormat.JPEG
+    private var manualLocked = false
+    private var latestExposureTimeNs: Long? = null
+    private var latestSensitivityIso: Int? = null
+    private var latestAwbGains: RggbChannelVector? = null
+    private var latestFocusDistance: Float? = null
+    private var manualExposureTimeNs: Long? = null
+    private var manualSensitivityIso: Int? = null
+    private var manualAwbGains: RggbChannelVector? = null
+    private var manualFocusDistance: Float? = null
+
     var aeLocked = false
         private set
+
+    val captureFormatText: String
+        get() = when (captureFormat) {
+            ImageFormat.YUV_420_888 -> "YUV_420_888"
+            ImageFormat.JPEG -> "JPEG"
+            else -> "format=$captureFormat"
+        }
 
     fun hardwareLevelText(): String {
         val level = characteristics.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)
@@ -62,7 +103,13 @@ class CaptureController(context: Context, private val textureView: TextureView) 
         }
         val aeLockAvailable =
             characteristics.get(CameraCharacteristics.CONTROL_AE_LOCK_AVAILABLE) == true
-        return "$name, AE잠금 ${if (aeLockAvailable) "가능" else "불가(정확도 저하)"}"
+        val caps = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+            ?.toSet()
+            .orEmpty()
+        val manual = CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR in caps
+        val raw = CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW in caps
+        return "$name, $captureFormatText, manual ${if (manual) "가능" else "불가"}, " +
+            "RAW ${if (raw) "가능" else "불가"}, AE잠금 ${if (aeLockAvailable) "가능" else "불가"}"
     }
 
     @SuppressLint("MissingPermission")
@@ -77,9 +124,15 @@ class CaptureController(context: Context, private val textureView: TextureView) 
 
         val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
             ?: throw IllegalStateException("스트림 설정 없음")
-        jpegSize = map.getOutputSizes(ImageFormat.JPEG)
-            .maxByOrNull { it.width.toLong() * it.height }
-            ?: throw IllegalStateException("JPEG 미지원")
+        val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888)?.toList().orEmpty()
+        val jpegSizes = map.getOutputSizes(ImageFormat.JPEG)?.toList().orEmpty()
+        val yuvSize = yuvSizes.maxByOrNull { it.width.toLong() * it.height }
+        val fallbackJpegSize = jpegSizes.maxByOrNull { it.width.toLong() * it.height }
+            ?: throw IllegalStateException("JPEG/YUV 촬영 출력 미지원")
+        captureFormat = if (yuvSize != null) ImageFormat.YUV_420_888 else ImageFormat.JPEG
+        captureSize = yuvSize ?: fallbackJpegSize
+        // 기존 호출부 호환용 이름. 실제 포맷은 captureFormatText를 확인한다.
+        jpegSize = captureSize
 
         val previewSize = map.getOutputSizes(SurfaceTexture::class.java)
             .filter { it.width <= 1280 }
@@ -89,7 +142,7 @@ class CaptureController(context: Context, private val textureView: TextureView) 
         val pSurface = Surface(texture)
         previewSurface = pSurface
 
-        reader = ImageReader.newInstance(jpegSize.width, jpegSize.height, ImageFormat.JPEG, 2)
+        reader = ImageReader.newInstance(captureSize.width, captureSize.height, captureFormat, 3)
 
         device = openCamera()
         session = createSession(listOf(pSurface, reader!!.surface))
@@ -101,51 +154,138 @@ class CaptureController(context: Context, private val textureView: TextureView) 
             set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
             set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_OFF)
         }
-        session!!.setRepeatingRequest(previewBuilder.build(), null, handler)
+        session!!.setRepeatingRequest(previewBuilder.build(), previewCallback, handler)
     }
 
     /** AE/AWB 잠금. 이후 모든 촬영이 같은 노출·화이트밸런스로 이루어진다. */
     fun lockAeAwb() {
+        manualLocked = false
         previewBuilder.set(CaptureRequest.CONTROL_AE_LOCK, true)
         previewBuilder.set(CaptureRequest.CONTROL_AWB_LOCK, true)
-        session?.setRepeatingRequest(previewBuilder.build(), null, handler)
+        session?.setRepeatingRequest(previewBuilder.build(), previewCallback, handler)
         aeLocked = true
     }
 
-    suspend fun captureFrames(count: Int, interFrameDelayMs: Long = 150): List<ByteArray> {
-        val list = ArrayList<ByteArray>(count)
+    /**
+     * 현재 자동 수렴 값을 수동 값으로 고정한다. FULL/LEVEL_3 기기에서는 ISO/셔터/WB/포커스를
+     * Camera2 manual request로 고정하고, 그 외 기기는 AE/AWB lock으로 fallback한다.
+     */
+    fun lockMeasurementControls(): String {
+        val caps = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+            ?.toSet()
+            .orEmpty()
+        val manualCapable = CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR in caps
+        val exposure = latestExposureTimeNs
+        val iso = latestSensitivityIso
+        if (manualCapable && exposure != null && iso != null) {
+            val exposureRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+            val isoRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+            manualExposureTimeNs = exposure.coerceInRange(exposureRange)
+            manualSensitivityIso = iso.coerceInRange(isoRange)
+            manualAwbGains = latestAwbGains
+            manualFocusDistance = latestFocusDistance?.let { focus ->
+                val maxFocus = characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+                if (maxFocus > 0f) focus.coerceIn(0f, maxFocus) else null
+            }
+            manualLocked = true
+            aeLocked = true
+            applyMeasurementControls(previewBuilder)
+            session?.setRepeatingRequest(previewBuilder.build(), previewCallback, handler)
+            val focusText = manualFocusDistance?.let { ", focus ${"%.2f".format(it)}D" } ?: ""
+            return "수동 고정: ISO $manualSensitivityIso, ${manualExposureTimeNs}ns$focusText"
+        }
+
+        lockAeAwb()
+        return "AE/AWB lock fallback"
+    }
+
+    suspend fun captureFrames(count: Int, interFrameDelayMs: Long = 150): List<CaptureFrame> {
+        val list = ArrayList<CaptureFrame>(count)
         repeat(count) {
-            list += withTimeout(12_000) { captureJpeg() }
+            list += withTimeout(12_000) { captureFrame() }
             delay(interFrameDelayMs)
         }
         return list
     }
 
-    private suspend fun captureJpeg(): ByteArray = suspendCancellableCoroutine { cont ->
+    private suspend fun captureFrame(): CaptureFrame = suspendCancellableCoroutine { cont ->
         val r = reader ?: return@suspendCancellableCoroutine cont.resumeWithException(
             IllegalStateException("카메라 미시작")
         )
         r.setOnImageAvailableListener({ rd ->
             val image = rd.acquireLatestImage() ?: return@setOnImageAvailableListener
-            val buf = image.planes[0].buffer
-            val bytes = ByteArray(buf.remaining())
-            buf.get(bytes)
-            image.close()
+            val frame = try {
+                image.toCaptureFrame()
+            } finally {
+                image.close()
+            }
             rd.setOnImageAvailableListener(null, null)
-            if (cont.isActive) cont.resume(bytes)
+            if (cont.isActive) cont.resume(frame)
         }, handler)
 
         val req = device!!.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
             addTarget(r.surface)
-            set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-            set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-            set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
-            set(CaptureRequest.CONTROL_AE_LOCK, aeLocked)
-            set(CaptureRequest.CONTROL_AWB_LOCK, aeLocked)
-            set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_OFF)
-            set(CaptureRequest.JPEG_QUALITY, 98.toByte())
+            applyMeasurementControls(this)
+            if (captureFormat == ImageFormat.JPEG) set(CaptureRequest.JPEG_QUALITY, 98.toByte())
         }
-        session!!.capture(req.build(), null, handler)
+        session!!.capture(req.build(), previewCallback, handler)
+    }
+
+    private fun applyMeasurementControls(builder: CaptureRequest.Builder) {
+        builder.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_OFF)
+        if (manualLocked) {
+            builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+            builder.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
+            builder.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_OFF)
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
+            manualExposureTimeNs?.let { builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, it) }
+            manualSensitivityIso?.let { builder.set(CaptureRequest.SENSOR_SENSITIVITY, it) }
+            manualAwbGains?.let {
+                builder.set(
+                    CaptureRequest.COLOR_CORRECTION_MODE,
+                    CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX,
+                )
+                builder.set(CaptureRequest.COLOR_CORRECTION_GAINS, it)
+            }
+            manualFocusDistance?.let { builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, it) }
+        } else {
+            builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            builder.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+            builder.set(CaptureRequest.CONTROL_AE_LOCK, aeLocked)
+            builder.set(CaptureRequest.CONTROL_AWB_LOCK, aeLocked)
+        }
+    }
+
+    private val previewCallback = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(
+            session: CameraCaptureSession,
+            request: CaptureRequest,
+            result: TotalCaptureResult,
+        ) {
+            latestExposureTimeNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: latestExposureTimeNs
+            latestSensitivityIso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: latestSensitivityIso
+            latestAwbGains = result.get(CaptureResult.COLOR_CORRECTION_GAINS) ?: latestAwbGains
+            latestFocusDistance = result.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: latestFocusDistance
+        }
+    }
+
+    private fun Image.toCaptureFrame(): CaptureFrame {
+        val copiedPlanes = planes.map { plane ->
+            val buffer = plane.buffer
+            val bytes = ByteArray(buffer.remaining())
+            buffer.get(bytes)
+            CaptureFrame.Plane(bytes, plane.rowStride, plane.pixelStride)
+        }
+        return CaptureFrame(
+            format = format,
+            width = width,
+            height = height,
+            planes = copiedPlanes,
+            timestampNs = timestamp,
+            sensitivityIso = manualSensitivityIso ?: latestSensitivityIso,
+            exposureTimeNs = manualExposureTimeNs ?: latestExposureTimeNs,
+        )
     }
 
     private suspend fun awaitSurfaceTexture(): SurfaceTexture =
@@ -206,4 +346,10 @@ class CaptureController(context: Context, private val textureView: TextureView) 
         reader = null
         thread.quitSafely()
     }
+
+    private fun Long.coerceInRange(range: Range<Long>?): Long =
+        if (range == null) this else coerceIn(range.lower, range.upper)
+
+    private fun Int.coerceInRange(range: Range<Int>?): Int =
+        if (range == null) this else coerceIn(range.lower, range.upper)
 }

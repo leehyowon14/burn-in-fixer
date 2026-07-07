@@ -54,4 +54,24 @@ class HomographyTest {
         assertTrue(Math.abs(out[0] - 250.0) < 1e-6)
         assertTrue(Math.abs(out[1] - 190.0) < 1e-6)
     }
+
+    @Test
+    fun solvesLeastSquaresFromManyPointPairs() {
+        val src = ArrayList<Vec2>()
+        val dst = ArrayList<Vec2>()
+        for (y in 0..100 step 25) {
+            for (x in 0..200 step 25) {
+                src += Vec2(x.toFloat(), y.toFloat())
+                dst += Vec2((30 + x * 1.3f + y * 0.08f), (20 + x * 0.04f + y * 1.1f))
+            }
+        }
+
+        val h = Homography.fromPointPairs(src, dst)
+        assertNotNull(h)
+        val out = DoubleArray(2)
+        h!!.map(125.0, 75.0, out)
+
+        assertTrue(Math.abs(out[0] - (30 + 125 * 1.3 + 75 * 0.08)) < 0.05)
+        assertTrue(Math.abs(out[1] - (20 + 125 * 0.04 + 75 * 1.1)) < 0.05)
+    }
 }

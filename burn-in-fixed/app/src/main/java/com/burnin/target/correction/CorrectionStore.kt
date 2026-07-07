@@ -27,16 +27,19 @@ object CorrectionStore {
         val maxAttenuation: Double,
         val defaultStrengthPct: Int,
         val checksumMd5: String,
+        val rgbChecksumMd5: String,
         val createdAt: String,
         val sourceDevice: String,
     ) {
         fun toJson(): JSONObject = JSONObject()
-            .put("profileVersion", 1)
+            .put("profileVersion", 2)
             .put("width", width)
             .put("height", height)
             .put("maxAttenuation", maxAttenuation)
             .put("defaultStrengthPct", defaultStrengthPct)
             .put("checksumMd5", checksumMd5)
+            .put("rgbChecksumMd5", rgbChecksumMd5)
+            .put("hasRgbMap", rgbChecksumMd5.isNotEmpty())
             .put("createdAt", createdAt)
             .put("sourceDevice", sourceDevice)
 
@@ -47,6 +50,7 @@ object CorrectionStore {
                 maxAttenuation = o.getDouble("maxAttenuation"),
                 defaultStrengthPct = o.optInt("defaultStrengthPct", 100),
                 checksumMd5 = o.optString("checksumMd5", ""),
+                rgbChecksumMd5 = o.optString("rgbChecksumMd5", ""),
                 createdAt = o.optString("createdAt", ""),
                 sourceDevice = o.optString("sourceDevice", ""),
             )
@@ -56,6 +60,8 @@ object CorrectionStore {
     @Volatile var meta: Meta? = null
         private set
     @Volatile var bakedBitmap: Bitmap? = null
+        private set
+    @Volatile var rgbAttenuationBitmap: Bitmap? = null
         private set
 
     private fun dir(context: Context): File =
@@ -85,6 +91,8 @@ object CorrectionStore {
         checksumMd5: String,
         dataBase64: String,
         sourceDevice: String,
+        rgbChecksumMd5: String = "",
+        rgbDataBase64: String? = null,
     ): String? {
         val png: ByteArray = try {
             Base64.decode(dataBase64, Base64.DEFAULT)
@@ -94,6 +102,20 @@ object CorrectionStore {
 
         if (checksumMd5.isNotEmpty() && !md5(png).equals(checksumMd5, ignoreCase = true)) {
             return "체크섬 불일치 (파일 손상)"
+        }
+        val rgbPng: ByteArray? = if (!rgbDataBase64.isNullOrBlank()) {
+            try {
+                Base64.decode(rgbDataBase64, Base64.DEFAULT)
+            } catch (e: Exception) {
+                return "RGB base64 디코드 실패"
+            }
+        } else {
+            null
+        }
+        if (rgbPng != null && rgbChecksumMd5.isNotEmpty() &&
+            !md5(rgbPng).equals(rgbChecksumMd5, ignoreCase = true)
+        ) {
+            return "RGB 체크섬 불일치 (파일 손상)"
         }
         if (maxAttenuation !in 0.0..0.30) {
             return "maxAttenuation 범위 오류: $maxAttenuation (허용 0~0.30)"
@@ -113,17 +135,30 @@ object CorrectionStore {
                 "해상도 불일치: 화면 ${screen.x}x${screen.y}, 보정맵 ${width}x${height}"
             }
         }
+        if (rgbPng != null) {
+            val rgbOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(rgbPng, 0, rgbPng.size, rgbOpts)
+            if (rgbOpts.outWidth != width || rgbOpts.outHeight != height) {
+                return "RGB PNG 크기(${rgbOpts.outWidth}x${rgbOpts.outHeight})가 메타데이터(${width}x${height})와 다름"
+            }
+        }
 
         val src = BitmapFactory.decodeByteArray(png, 0, png.size)
             ?: return "PNG 디코드 실패"
 
         val baked = bake(src, maxAttenuation)
         src.recycle()
+        val rgbBitmap = rgbPng?.let {
+            BitmapFactory.decodeByteArray(it, 0, it.size)?.copy(Bitmap.Config.ARGB_8888, false)
+                ?: return "RGB PNG 디코드 실패"
+        }
 
         val d = dir(context)
         File(d, "correction_alpha.png").writeBytes(png)
+        val rgbFile = File(d, "correction_rgb.png")
+        if (rgbPng != null) rgbFile.writeBytes(rgbPng) else rgbFile.delete()
         val m = Meta(
-            width, height, maxAttenuation, defaultStrengthPct, checksumMd5,
+            width, height, maxAttenuation, defaultStrengthPct, checksumMd5, rgbChecksumMd5,
             createdAt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ", java.util.Locale.US)
                 .format(java.util.Date()),
             sourceDevice = sourceDevice,
@@ -131,9 +166,14 @@ object CorrectionStore {
         File(d, "metadata.json").writeText(m.toJson().toString(2))
 
         bakedBitmap?.recycle()
+        rgbAttenuationBitmap?.recycle()
         meta = m
         bakedBitmap = baked
-        AppLog.i("보정맵 적용 준비 완료: ${width}x${height}, maxAtt=$maxAttenuation")
+        rgbAttenuationBitmap = rgbBitmap
+        AppLog.i(
+            "보정맵 적용 준비 완료: ${width}x${height}, maxAtt=$maxAttenuation, " +
+                "RGB ${if (rgbBitmap != null) "있음" else "없음"}"
+        )
         return null
     }
 
@@ -161,10 +201,18 @@ object CorrectionStore {
             val src = BitmapFactory.decodeFile(pngFile.absolutePath) ?: return false
             val baked = bake(src, m.maxAttenuation)
             src.recycle()
+            val rgbFile = File(d, "correction_rgb.png")
+            val rgb = if (rgbFile.exists()) {
+                BitmapFactory.decodeFile(rgbFile.absolutePath)?.copy(Bitmap.Config.ARGB_8888, false)
+            } else {
+                null
+            }
             bakedBitmap?.recycle()
+            rgbAttenuationBitmap?.recycle()
             meta = m
             bakedBitmap = baked
-            AppLog.i("저장된 보정 프로파일 적재: ${m.width}x${m.height}")
+            rgbAttenuationBitmap = rgb
+            AppLog.i("저장된 보정 프로파일 적재: ${m.width}x${m.height}, RGB ${rgb != null}")
             true
         } catch (e: Exception) {
             AppLog.i("프로파일 적재 실패: ${e.message}")

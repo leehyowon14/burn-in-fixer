@@ -45,6 +45,25 @@ class PipelineTest {
         return GrayImage(camW, camH, data)
     }
 
+    /** RGB30 단색 패턴처럼 낮은 신호에서 특정 채널만 공간 편차가 있는 합성 프레임 */
+    private fun renderLowLightRgb(): RgbImage {
+        val r = FloatArray(camW * camH) { 0.002f }
+        val g = FloatArray(camW * camH) { 0.002f }
+        val b = FloatArray(camW * camH) { 0.002f }
+        for (y in top until bottom) {
+            for (x in left until right) {
+                val u = (x - left + 0.5f) / (right - left) * screenW
+                val v = (y - top + 0.5f) / (bottom - top) * screenH
+                var red = 0.30f
+                if (u >= 480f && u < 520f && v >= 60f && v < 100f) red *= 0.90f
+                r[y * camW + x] = red
+                g[y * camW + x] = 0.15f
+                b[y * camW + x] = 0.09f
+            }
+        }
+        return RgbImage(camW, camH, r, g, b)
+    }
+
     /** 가장자리 confidence ramp 바깥(내부 80%)만 잘라낸 그리드 */
     private fun interior(grid: FloatArray, gw: Int, gh: Int): FloatArray {
         val x0 = (gw * 0.10f).toInt()
@@ -171,6 +190,89 @@ class PipelineTest {
         assertTrue("gray30 보정량이 섞여야 함: ${mixed[1]}", mixed[1] < primary[1])
         assertTrue("gray30만큼 과격하게 따라가면 안 됨: ${mixed[1]}", mixed[1] > lowLight[1])
         assertTrue("gain 범위 위반: ${mixed[1]}", mixed[1] in 0.95f..1f)
+    }
+
+    @Test
+    fun averageGainGridsMergesRgbLowLightAttenuation() {
+        val red = floatArrayOf(1f, 0.99f, 0.98f)
+        val green = floatArrayOf(1f, 0.97f, 0.98f)
+        val blue = floatArrayOf(1f, 0.95f, 1f)
+
+        val avg = Analyzer.averageGainGrids(listOf(red, green, blue), 0.05f)!!
+
+        assertTrue("RGB attenuation 평균 오류: ${avg[1]}", Math.abs(avg[1] - 0.97f) < 1e-5f)
+        assertTrue("최대 감쇠 범위 위반: ${avg[1]}", avg[1] in 0.95f..1f)
+        assertTrue("채널별 attenuation이 반영돼야 함: ${avg[2]}", avg[2] < 0.99f)
+    }
+
+    @Test
+    fun rgbChannelGridExtractsSelectedLowLightChannel() {
+        val gw = 64
+        val gh = 40
+        val before = renderCamera()
+        val det = ScreenDetector.detect(before)!!
+        val h = Analyzer.buildHomography(det.quad, screenW, screenH)!!
+        val black = RgbImage(
+            camW,
+            camH,
+            FloatArray(camW * camH) { 0.002f },
+            FloatArray(camW * camH) { 0.002f },
+            FloatArray(camW * camH) { 0.002f },
+        )
+
+        val rgb = renderLowLightRgb()
+        val redGrid = Analyzer.channelGrid(rgb, black, 0, h, screenW, screenH, gw, gh)
+        val greenGrid = Analyzer.channelGrid(rgb, black, 1, h, screenW, screenH, gw, gh)
+        val redStats = Analyzer.stats(interior(redGrid, gw, gh))
+        val greenStats = Analyzer.stats(interior(greenGrid, gw, gh))
+
+        assertTrue("red30 median 범위 이상: ${redStats.median}", redStats.median in 0.29f..0.31f)
+        assertTrue("red30 채널 편차를 감지해야 함: ${redStats.rmsDev}", redStats.rmsDev > 0.006f)
+        assertTrue("green30 균일 채널은 낮은 RMS여야 함: ${greenStats.rmsDev}", greenStats.rmsDev < 0.003f)
+    }
+
+    @Test
+    fun confidenceWeightedGainSuppressesLowTrustCells() {
+        val gw = 20
+        val gh = 20
+        val luma = FloatArray(gw * gh)
+        val confidence = FloatArray(gw * gh)
+        for (y in 0 until gh) {
+            for (x in 0 until gw) {
+                luma[y * gw + x] = 1f + x * 0.01f
+                confidence[y * gw + x] = if (x < gw / 2) 1f else 0f
+            }
+        }
+
+        val gain = Analyzer.gainGrid(luma, gw, gh, 0.10f, confidence)
+
+        assertTrue("신뢰 높은 셀은 보정돼야 함: ${gain[gh / 2 * gw + 6]}", gain[gh / 2 * gw + 6] < 0.99f)
+        assertTrue("신뢰 낮은 셀은 보정이 억제돼야 함: ${gain[gh / 2 * gw + 15]}", gain[gh / 2 * gw + 15] > 0.995f)
+    }
+
+    @Test
+    fun radialFlatFieldReducesCameraVignetting() {
+        val gw = 64
+        val gh = 40
+        val data = FloatArray(gw * gh)
+        val cx = (gw - 1) * 0.5f
+        val cy = (gh - 1) * 0.5f
+        val maxR = Math.sqrt((cx * cx + cy * cy).toDouble()).toFloat()
+        for (y in 0 until gh) {
+            for (x in 0 until gw) {
+                val dx = x - cx
+                val dy = y - cy
+                val r = Math.sqrt((dx * dx + dy * dy).toDouble()).toFloat() / maxR
+                data[y * gw + x] = 1f - 0.12f * r
+            }
+        }
+
+        val before = Analyzer.stats(data).rmsDev
+        val flat = Analyzer.radialFlatField(data, gw, gh)
+        val corrected = Analyzer.applyFlatField(data, flat)
+        val after = Analyzer.stats(corrected).rmsDev
+
+        assertTrue("flat-field 보정 후 RMS가 줄어야 함: before=$before after=$after", after < before * 0.35f)
     }
 
     @Test

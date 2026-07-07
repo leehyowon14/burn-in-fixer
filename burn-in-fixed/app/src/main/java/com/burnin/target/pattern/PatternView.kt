@@ -26,12 +26,28 @@ class PatternView(context: Context) : View(context) {
     var correctionBitmap: Bitmap? = null
         set(value) {
             field = value
+            clearSolidCache()
+            invalidate()
+        }
+
+    var correctionRgbBitmap: Bitmap? = null
+        set(value) {
+            field = value
+            clearSolidCache()
+            invalidate()
+        }
+
+    var correctionMaxAttenuation: Double = 0.05
+        set(value) {
+            field = value
+            clearSolidCache()
             invalidate()
         }
 
     var correctionEnabled: Boolean = false
         set(value) {
             field = value
+            clearSolidCache()
             invalidate()
         }
 
@@ -39,6 +55,7 @@ class PatternView(context: Context) : View(context) {
     var strengthPct: Int = 100
         set(value) {
             field = value.coerceIn(0, 100)
+            clearSolidCache()
             invalidate()
         }
 
@@ -46,12 +63,27 @@ class PatternView(context: Context) : View(context) {
     private val mapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val srcRect = Rect()
     private val dstRect = Rect()
+    private var solidCache: Bitmap? = null
+    private var solidCacheColor: Int = 0
+    private var solidCacheW: Int = 0
+    private var solidCacheH: Int = 0
+    private var solidCacheStrength: Int = -1
+    private var solidCacheRgb: Bitmap? = null
 
     override fun onDraw(canvas: Canvas) {
         val w = width
         val h = height
+        var usedRgbSolid = false
         when (spec.kind) {
-            PatternSpec.Kind.SOLID -> canvas.drawColor(spec.color)
+            PatternSpec.Kind.SOLID -> {
+                val rgb = correctionRgbBitmap
+                if (correctionEnabled && rgb != null) {
+                    canvas.drawBitmap(correctedSolidBitmap(spec.color, w, h, rgb), 0f, 0f, null)
+                    usedRgbSolid = true
+                } else {
+                    canvas.drawColor(spec.color)
+                }
+            }
 
             PatternSpec.Kind.MARKER -> drawMarker(canvas, w, h)
 
@@ -96,7 +128,7 @@ class PatternView(context: Context) : View(context) {
         }
 
         val bmp = correctionBitmap
-        if (correctionEnabled && bmp != null && spec.name != "marker") {
+        if (correctionEnabled && bmp != null && spec.name != "marker" && !usedRgbSolid) {
             srcRect.set(0, 0, bmp.width, bmp.height)
             dstRect.set(0, 0, w, h)
             mapPaint.alpha = strengthPct * 255 / 100
@@ -136,5 +168,59 @@ class PatternView(context: Context) : View(context) {
                 canvas.drawCircle(w * c / n.toFloat(), h * r / n.toFloat(), m * 0.004f, paint)
             }
         }
+    }
+
+    private fun correctedSolidBitmap(color: Int, w: Int, h: Int, rgb: Bitmap): Bitmap {
+        solidCache?.let { cached ->
+            if (
+                solidCacheColor == color &&
+                solidCacheW == w &&
+                solidCacheH == h &&
+                solidCacheStrength == strengthPct &&
+                solidCacheRgb === rgb
+            ) {
+                return cached
+            }
+        }
+        clearSolidCache()
+        val map = if (rgb.width == w && rgb.height == h) rgb else Bitmap.createScaledBitmap(rgb, w, h, true)
+        val att = IntArray(w * h)
+        map.getPixels(att, 0, w, 0, 0, w, h)
+        if (map !== rgb) map.recycle()
+        val baseR = Color.red(color)
+        val baseG = Color.green(color)
+        val baseB = Color.blue(color)
+        val strength = strengthPct / 100.0
+        val maxAtt = correctionMaxAttenuation
+        val out = IntArray(w * h)
+        for (i in out.indices) {
+            val p = att[i]
+            val rGain = 1.0 - (Color.red(p) / 255.0) * maxAtt * strength
+            val gGain = 1.0 - (Color.green(p) / 255.0) * maxAtt * strength
+            val bGain = 1.0 - (Color.blue(p) / 255.0) * maxAtt * strength
+            val r = Math.round(baseR * rGain).toInt().coerceIn(0, 255)
+            val g = Math.round(baseG * gGain).toInt().coerceIn(0, 255)
+            val b = Math.round(baseB * bGain).toInt().coerceIn(0, 255)
+            out[i] = Color.rgb(r, g, b)
+        }
+        val bmp = Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
+        solidCache = bmp
+        solidCacheColor = color
+        solidCacheW = w
+        solidCacheH = h
+        solidCacheStrength = strengthPct
+        solidCacheRgb = rgb
+        return bmp
+    }
+
+    private fun clearSolidCache() {
+        solidCache?.recycle()
+        solidCache = null
+        solidCacheRgb = null
+    }
+
+    override fun onDetachedFromWindow() {
+        clearSolidCache()
+        super.onDetachedFromWindow()
     }
 }

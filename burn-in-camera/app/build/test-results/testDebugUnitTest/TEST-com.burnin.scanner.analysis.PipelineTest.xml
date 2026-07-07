@@ -1,12 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.burnin.scanner.analysis.PipelineTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-07-07T16:08:51" hostname="MacBook-Pro-3.local" time="0.153">
+<testsuite name="com.burnin.scanner.analysis.PipelineTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-07-07T16:36:28" hostname="MacBook-Pro-3.local" time="0.163">
   <properties/>
   <testcase name="geometryQualityIsLowForUndistortedQuad" classname="com.burnin.scanner.analysis.PipelineTest" time="0.006"/>
-  <testcase name="lowLightGainMixContributesToCorrection" classname="com.burnin.scanner.analysis.PipelineTest" time="0.0"/>
+  <testcase name="lowLightGainMixContributesToCorrection" classname="com.burnin.scanner.analysis.PipelineTest" time="0.001"/>
+  <testcase name="averageGainGridsMergesRgbLowLightAttenuation" classname="com.burnin.scanner.analysis.PipelineTest" time="0.008"/>
   <testcase name="homographyAlignsScreenCoordinates" classname="com.burnin.scanner.analysis.PipelineTest" time="0.012"/>
-  <testcase name="endToEndCorrectionImprovesUniformity" classname="com.burnin.scanner.analysis.PipelineTest" time="0.05"/>
-  <testcase name="rotatedCameraStillBuildsHomography" classname="com.burnin.scanner.analysis.PipelineTest" time="0.003"/>
-  <testcase name="iterativeRefinementConverges" classname="com.burnin.scanner.analysis.PipelineTest" time="0.082"/>
+  <testcase name="endToEndCorrectionImprovesUniformity" classname="com.burnin.scanner.analysis.PipelineTest" time="0.044"/>
+  <testcase name="rotatedCameraStillBuildsHomography" classname="com.burnin.scanner.analysis.PipelineTest" time="0.001"/>
+  <testcase name="iterativeRefinementConverges" classname="com.burnin.scanner.analysis.PipelineTest" time="0.069"/>
+  <testcase name="rgbChannelGridExtractsSelectedLowLightChannel" classname="com.burnin.scanner.analysis.PipelineTest" time="0.022"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

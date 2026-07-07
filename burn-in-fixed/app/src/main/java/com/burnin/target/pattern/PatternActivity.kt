@@ -35,7 +35,7 @@ class PatternActivity : Activity(), PatternBus.Host {
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
 
         view.setOnClickListener {
-            if (view.correctionBitmap != null) {
+            if (view.correctionBitmap != null || view.correctionRgbBitmap != null) {
                 PatternBus.correctionEnabled = !view.correctionEnabled
                 applyCorrectionState()
                 AppLog.i("탭 토글: 보정 ${if (view.correctionEnabled) "ON" else "OFF"}")
@@ -49,6 +49,8 @@ class PatternActivity : Activity(), PatternBus.Host {
         PatternBus.register(this)
         view.spec = PatternBus.currentSpec
         view.correctionBitmap = CorrectionStore.bakedBitmap
+        view.correctionRgbBitmap = CorrectionStore.rgbAttenuationBitmap
+        view.correctionMaxAttenuation = CorrectionStore.meta?.maxAttenuation ?: 0.05
         applyCorrectionState()
     }
 
@@ -87,6 +89,8 @@ class PatternActivity : Activity(), PatternBus.Host {
     override fun applyCorrectionState() {
         // 세션 중 새 보정맵이 수신됐을 수 있으므로 비트맵도 함께 갱신한다
         view.correctionBitmap = CorrectionStore.bakedBitmap
+        view.correctionRgbBitmap = CorrectionStore.rgbAttenuationBitmap
+        view.correctionMaxAttenuation = CorrectionStore.meta?.maxAttenuation ?: 0.05
         view.correctionEnabled = PatternBus.correctionEnabled
         view.strengthPct = PatternBus.strengthPct
     }

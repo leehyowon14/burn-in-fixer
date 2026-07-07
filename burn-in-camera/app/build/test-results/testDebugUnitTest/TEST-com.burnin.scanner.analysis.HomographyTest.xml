@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.burnin.scanner.analysis.HomographyTest" tests="2" skipped="0" failures="0" errors="0" timestamp="2026-07-07T16:08:51" hostname="MacBook-Pro-3.local" time="0.006">
+<testsuite name="com.burnin.scanner.analysis.HomographyTest" tests="2" skipped="0" failures="0" errors="0" timestamp="2026-07-07T16:36:28" hostname="MacBook-Pro-3.local" time="0.006">
   <properties/>
   <testcase name="mapsRectangleExactly" classname="com.burnin.scanner.analysis.HomographyTest" time="0.002"/>
   <testcase name="solvesPerspectiveTransform" classname="com.burnin.scanner.analysis.HomographyTest" time="0.003"/>

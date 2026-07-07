@@ -12,6 +12,7 @@ class PatternSpecTest {
         assertEquals(0xFFB3B3B3.toInt(), PatternSpec.parse("gray70")!!.color)
         // 255 * 0.85 = 216.75 → 217 (0xD9)
         assertEquals(0xFFD9D9D9.toInt(), PatternSpec.parse("white85")!!.color)
+        assertEquals(0xFF404040.toInt(), PatternSpec.parse("gray25")!!.color)
         assertEquals(0xFF4D4D4D.toInt(), PatternSpec.parse("gray30")!!.color)
         assertEquals(PatternSpec.Kind.SOLID, PatternSpec.parse("gray70")!!.kind)
     }
