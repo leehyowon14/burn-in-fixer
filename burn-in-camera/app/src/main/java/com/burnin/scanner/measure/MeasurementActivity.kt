@@ -34,6 +34,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.io.File
 import java.security.MessageDigest
 
 /**
@@ -54,7 +59,7 @@ import java.security.MessageDigest
 class MeasurementActivity : Activity() {
 
     companion object {
-        private const val FRAMES_PER_PATTERN = 3
+        private const val FRAMES_PER_PATTERN = 5
         private const val LOW_LIGHT_PATTERN = "gray25"
         private const val LOW_LIGHT_FRAMES = 5
         private const val LOW_LIGHT_STRAY_WARN = 0.10f
@@ -72,9 +77,11 @@ class MeasurementActivity : Activity() {
         private const val DAMPING_ALPHA = 0.3f   // 반복 damping
         private const val DRIFT_LIMIT = 0.10f    // 중앙 휘도 드리프트 > 10%면 조건 변화로 무효
         private const val DISTORTION_WARN_SCORE = 0.18f
-        private const val FLICKER_STABILITY_GRID_MAX_EDGE = 160
+        private const val FLICKER_STABILITY_GRID_MAX_EDGE = 512
         private const val FLICKER_OK_RELATIVE_RANGE = 0.015f
         private const val FLICKER_ZERO_RELATIVE_RANGE = 0.045f
+        private const val FLICKER_INTER_FRAME_DELAY_MS = 1_200L
+        private const val CAPTURE_FRAME_MAGIC = 0x42494631 // BIF1
         private val RGB70_PATTERNS = listOf("red70", "green70", "blue70")
         private val RGB30_PATTERNS = listOf("red30", "green30", "blue30")
     }
@@ -90,13 +97,22 @@ class MeasurementActivity : Activity() {
 
     private data class GrayCapture(
         val average: GrayImage,
-        val frames: List<GrayImage>,
+        val frameStore: CaptureFrameStore,
     )
 
     private data class RgbCapture(
         val average: RgbImage,
-        val frames: List<RgbImage>,
+        val frameStore: CaptureFrameStore,
     )
+
+    private data class CaptureFrameStore(
+        val files: List<File>,
+        val spanMs: Long,
+    ) {
+        fun delete() {
+            files.forEach { file -> runCatching { file.delete() } }
+        }
+    }
 
     private data class RgbMeasurement(
         val stats: LinkedHashMap<String, Analyzer.Stats>,
@@ -204,8 +220,6 @@ class MeasurementActivity : Activity() {
             det.areaRatio > 0.95f ->
                 log("경고: 화면이 프레임을 넘칠 수 있음. 카메라를 조금 멀리")
         }
-        val initialHomography = Analyzer.buildHomography(det.quad, screenW, screenH)
-            ?: throw IllegalStateException("호모그래피 계산 실패")
         val geometry = Analyzer.geometryQuality(det.quad, screenW, screenH)
         log(
             "시작 왜곡/정렬 점수 ${fmt(geometry.score)} " +
@@ -214,6 +228,34 @@ class MeasurementActivity : Activity() {
         )
         if (geometry.score > DISTORTION_WARN_SCORE) {
             log("경고: 시작 기하 왜곡이 큼 — 카메라를 화면과 더 평행하게 맞추면 고해상도 맵 품질이 좋아집니다")
+        }
+        val fallbackHomography = Analyzer.buildHomography(det.quad, screenW, screenH)
+            ?: throw IllegalStateException("호모그래피 계산 실패")
+        status("2/10 방향 마커 촬영, 화면 좌표 방향 판별...")
+        val markerOrientation = try {
+            withContext(Dispatchers.IO) { client.showPattern("marker") }
+            delay(800)
+            val markerAvg = captureAveraged(cap)
+            withContext(Dispatchers.Default) {
+                Analyzer.buildHomographyWithMarker(det.quad, markerAvg, screenW, screenH)
+            }
+        } catch (e: Exception) {
+            log("방향 마커 판별 건너뜀: ${e.message}")
+            null
+        }
+        val cornerMapping = markerOrientation?.mapping
+        val initialHomography = markerOrientation?.homography ?: fallbackHomography
+        if (markerOrientation != null) {
+            log(
+                "방향 마커: ${markerOrientation.mapping.label}, " +
+                    "score ${fmt(markerOrientation.markerScore)}, " +
+                    "confidence ${pct(markerOrientation.confidence)}"
+            )
+            if (markerOrientation.confidence < 0.25f) {
+                log("경고: 방향 마커 confidence 낮음 — 마커 패턴이 가려지거나 초점이 흐릴 수 있습니다")
+            }
+        } else {
+            log("방향 마커 판별 실패 — 기본 코너 매핑으로 계속 진행")
         }
         status("2/10 dot-grid 기준점 촬영, 호모그래피 보강...")
         val dotGrid = try {
@@ -244,9 +286,10 @@ class MeasurementActivity : Activity() {
         status("3/10 black 패턴 촬영 (오프셋/미광 검증)...")
         withContext(Dispatchers.IO) { client.showPattern("black") }
         delay(700)
-        val blackFrames = cap.captureFrames(FRAMES_PER_PATTERN)
-        val blackAvg = decodeAveragedGray(blackFrames)
-        val blackRgbAvg = decodeAveragedRgb(blackFrames)
+        val blackStore = captureFrameStore(cap, FRAMES_PER_PATTERN)
+        val blackAvg = averageGrayFromStore(blackStore)
+        val blackRgbAvg = averageRgbFromStore(blackStore)
+        blackStore.delete()
 
         // ── 4. 휘도맵 + 목표값 ──────────────────────────────────
         status("4/10 gray70 휘도맵 계산 (기기 해상도 1:1)...")
@@ -269,7 +312,7 @@ class MeasurementActivity : Activity() {
             Analyzer.confidenceGrid(lumaBeforeRaw, blackFullGrid, strayWarn = 0.05f)
         }
         val flickerConfidence70 = temporalLumaConfidence(
-            grayCapture.frames, blackAvg, homography, screenW, screenH, gw, gh
+            grayCapture.frameStore, blackAvg, homography, screenW, screenH, gw, gh
         )
         val confidence70 = withContext(Dispatchers.Default) {
             Analyzer.combineConfidence(baseConfidence70, flickerConfidence70)
@@ -284,7 +327,8 @@ class MeasurementActivity : Activity() {
         log(
             "카메라 flat-field 보정: radial max ${pct(Analyzer.flatFieldStrength(flatField))}, " +
                 "gray70 confidence 평균 ${pct(Analyzer.meanConfidence(confidence70))}, " +
-                "프레임 안정도 ${pct(Analyzer.meanConfidence(flickerConfidence70))}"
+                "프레임 안정도 ${pct(Analyzer.meanConfidence(flickerConfidence70))}, " +
+                "flicker span ${fmtSeconds(grayCapture.frameStore.spanMs)}"
         )
         if (strayRatio > 0.05f) {
             log("경고: 잔여 미광 ${(strayRatio * 100).toInt()}% — 박스 차광을 보완하세요")
@@ -308,7 +352,7 @@ class MeasurementActivity : Activity() {
             Analyzer.confidenceGrid(lumaLowBeforeRaw, blackFullGrid, strayWarn = LOW_LIGHT_STRAY_WARN)
         }
         val flickerConfidenceLow = temporalLumaConfidence(
-            lowBeforeCapture.frames, blackAvg, homography, screenW, screenH, gw, gh
+            lowBeforeCapture.frameStore, blackAvg, homography, screenW, screenH, gw, gh
         )
         val confidenceLow = withContext(Dispatchers.Default) {
             Analyzer.combineConfidence(baseConfidenceLow, flickerConfidenceLow)
@@ -333,7 +377,8 @@ class MeasurementActivity : Activity() {
         }
         log(
             "$LOW_LIGHT_PATTERN confidence 평균 ${pct(Analyzer.meanConfidence(confidenceLow))}, " +
-                "프레임 안정도 ${pct(Analyzer.meanConfidence(flickerConfidenceLow))}"
+                "프레임 안정도 ${pct(Analyzer.meanConfidence(flickerConfidenceLow))}, " +
+                "flicker span ${fmtSeconds(lowBeforeCapture.frameStore.spanMs)}"
         )
 
         // ── 6. RGB 채널별 측정: 70% 진단 + 30% 보정 혼합 ─────────
@@ -431,7 +476,7 @@ class MeasurementActivity : Activity() {
             val afterCapture = captureGray(cap)
             val afterAvg = afterCapture.average
             val detAfter = withContext(Dispatchers.Default) { ScreenDetector.detect(afterAvg) }
-            val hAfter = detAfter?.let { Analyzer.buildHomography(it.quad, screenW, screenH) }
+            val hAfter = detAfter?.let { Analyzer.buildHomography(it.quad, screenW, screenH, cornerMapping) }
                 ?: homography
             if (detAfter != null) {
                 val shift = Math.abs(detAfter.quad.tl.x - det.quad.tl.x) +
@@ -448,7 +493,7 @@ class MeasurementActivity : Activity() {
                 Analyzer.confidenceGrid(lumaAfterRaw, blackFullGrid, strayWarn = 0.05f)
             }
             val flickerConfidenceAfter = temporalLumaConfidence(
-                afterCapture.frames, blackAvg, hAfter, screenW, screenH, gw, gh
+                afterCapture.frameStore, blackAvg, hAfter, screenW, screenH, gw, gh
             )
             val confidenceAfter = withContext(Dispatchers.Default) {
                 Analyzer.combineConfidence(baseConfidenceAfter, flickerConfidenceAfter)
@@ -466,7 +511,7 @@ class MeasurementActivity : Activity() {
                 Analyzer.confidenceGrid(lumaLowAfterRaw, blackFullGrid, strayWarn = LOW_LIGHT_STRAY_WARN)
             }
             val flickerConfidenceLowAfter = temporalLumaConfidence(
-                lowAfterCapture.frames, blackAvg, hAfter, screenW, screenH, gw, gh
+                lowAfterCapture.frameStore, blackAvg, hAfter, screenW, screenH, gw, gh
             )
             val confidenceLowAfter = withContext(Dispatchers.Default) {
                 Analyzer.combineConfidence(baseConfidenceLowAfter, flickerConfidenceLowAfter)
@@ -604,7 +649,7 @@ class MeasurementActivity : Activity() {
             delay(900)
             val finalAvg = captureAveraged(cap)
             val detFinal = withContext(Dispatchers.Default) { ScreenDetector.detect(finalAvg) }
-            val hFinal = detFinal?.let { Analyzer.buildHomography(it.quad, screenW, screenH) }
+            val hFinal = detFinal?.let { Analyzer.buildHomography(it.quad, screenW, screenH, cornerMapping) }
                 ?: homography
             val finalGridRaw = withContext(Dispatchers.Default) {
                 Analyzer.lumaGrid(finalAvg, blackAvg, hFinal, screenW, screenH, gw, gh)
@@ -709,14 +754,19 @@ class MeasurementActivity : Activity() {
             .put("geometryEdgeBalance", geometry.edgeBalance.toDouble())
             .put("geometryDiagonalError", geometry.diagonalError.toDouble())
             .put("geometryParallelErrorDeg", geometry.parallelErrorDeg.toDouble())
+            .put("markerOrientation", markerOrientation?.mapping?.label ?: "fallback")
+            .put("markerOrientationScore", (markerOrientation?.markerScore ?: 0f).toDouble())
+            .put("markerOrientationConfidence", (markerOrientation?.confidence ?: 0f).toDouble())
             .put("dotGridMatchedPoints", dotGrid?.matchedPoints ?: 0)
             .put("dotGridRmsResidualPx", (dotGrid?.rmsResidualPx ?: 0f).toDouble())
             .put("dotGridMaxResidualPx", (dotGrid?.maxResidualPx ?: 0f).toDouble())
             .put("flatFieldRadialMaxDeviation", Analyzer.flatFieldStrength(flatField).toDouble())
             .put("gray70ConfidenceMean", Analyzer.meanConfidence(confidence70).toDouble())
             .put("gray70FrameStabilityMean", Analyzer.meanConfidence(flickerConfidence70).toDouble())
+            .put("gray70FlickerFrameSpanSeconds", grayCapture.frameStore.spanMs / 1000.0)
             .put("lowLightConfidenceMean", Analyzer.meanConfidence(confidenceLow).toDouble())
             .put("lowLightFrameStabilityMean", Analyzer.meanConfidence(flickerConfidenceLow).toDouble())
+            .put("lowLightFlickerFrameSpanSeconds", lowBeforeCapture.frameStore.spanMs / 1000.0)
             .put("strayLightRatio", strayRatio.toDouble())
             .put("rmsBefore", statsBefore.rmsDev.toDouble())
             .put("p95Before", statsBefore.p95Dev.toDouble())
@@ -930,14 +980,17 @@ class MeasurementActivity : Activity() {
                     Analyzer.confidenceGrid(rawGrid, blackFull, strayWarn = LOW_LIGHT_STRAY_WARN)
                 }
                 val flickerConfidence = temporalChannelConfidence(
-                    capture.frames, blackRgb, channel, h, screenW, screenH, gw, gh
+                    capture.frameStore, blackRgb, channel, h, screenW, screenH, gw, gh
                 )
                 val confidence = withContext(Dispatchers.Default) {
                     Analyzer.combineConfidence(baseConfidence, flickerConfidence)
                 }
                 confidences[pattern] = confidence
                 if (includeGain || makeHeatmaps) {
-                    log("$pattern 프레임 안정도 ${pct(Analyzer.meanConfidence(flickerConfidence))}")
+                    log(
+                        "$pattern 프레임 안정도 ${pct(Analyzer.meanConfidence(flickerConfidence))}, " +
+                            "flicker span ${fmtSeconds(capture.frameStore.spanMs)}"
+                    )
                 }
             }
             if (includeGain) {
@@ -1036,7 +1089,9 @@ class MeasurementActivity : Activity() {
         frameCount: Int,
         settleMs: Long = 900,
     ): GrayImage {
-        return capturePatternGray(client, cap, pattern, frameCount, settleMs).average
+        val capture = capturePatternGray(client, cap, pattern, frameCount, settleMs)
+        capture.frameStore.delete()
+        return capture.average
     }
 
     private suspend fun capturePatternGray(
@@ -1058,7 +1113,9 @@ class MeasurementActivity : Activity() {
         frameCount: Int,
         settleMs: Long = 900,
     ): RgbImage {
-        return capturePatternRgb(client, cap, pattern, frameCount, settleMs).average
+        val capture = capturePatternRgb(client, cap, pattern, frameCount, settleMs)
+        capture.frameStore.delete()
+        return capture.average
     }
 
     private suspend fun capturePatternRgb(
@@ -1077,51 +1134,123 @@ class MeasurementActivity : Activity() {
         cap: CaptureController,
         frameCount: Int = FRAMES_PER_PATTERN,
     ): GrayImage {
-        return captureGray(cap, frameCount).average
+        val capture = captureGray(cap, frameCount)
+        capture.frameStore.delete()
+        return capture.average
     }
 
     private suspend fun captureGray(
         cap: CaptureController,
         frameCount: Int = FRAMES_PER_PATTERN,
     ): GrayCapture {
-        val frames = cap.captureFrames(frameCount)
-        val decoded = decodeGrayFrames(frames)
-        val average = withContext(Dispatchers.Default) { ImageOps.average(decoded) }
-        return GrayCapture(average, decoded)
+        val store = captureFrameStore(cap, frameCount)
+        return GrayCapture(averageGrayFromStore(store), store)
     }
 
     private suspend fun captureRgb(
         cap: CaptureController,
         frameCount: Int,
     ): RgbCapture {
-        val frames = cap.captureFrames(frameCount)
-        val decoded = decodeRgbFrames(frames)
-        val average = withContext(Dispatchers.Default) { ImageOps.averageRgb(decoded) }
-        return RgbCapture(average, decoded)
+        val store = captureFrameStore(cap, frameCount)
+        return RgbCapture(averageRgbFromStore(store), store)
     }
 
-    private suspend fun decodeAveragedGray(frames: List<CaptureFrame>): GrayImage =
+    private suspend fun captureFrameStore(
+        cap: CaptureController,
+        frameCount: Int,
+        interFrameDelayMs: Long = FLICKER_INTER_FRAME_DELAY_MS,
+    ): CaptureFrameStore {
+        val files = ArrayList<File>(frameCount)
+        var firstTimestampNs: Long? = null
+        var lastTimestampNs: Long? = null
+        val wallStartMs = System.currentTimeMillis()
+        try {
+            repeat(frameCount) { index ->
+                val frame = cap.captureSingleFrame()
+                if (frame.timestampNs > 0L) {
+                    if (firstTimestampNs == null) firstTimestampNs = frame.timestampNs
+                    lastTimestampNs = frame.timestampNs
+                }
+                val file = File.createTempFile("capture_${System.nanoTime()}_", ".bin", cacheDir)
+                writeCaptureFrame(file, frame)
+                files += file
+                if (index != frameCount - 1) delay(interFrameDelayMs)
+            }
+            val sensorSpanMs = firstTimestampNs?.let { first ->
+                lastTimestampNs?.let { last -> ((last - first) / 1_000_000L).coerceAtLeast(0L) }
+            } ?: 0L
+            val wallSpanMs = (System.currentTimeMillis() - wallStartMs).coerceAtLeast(0L)
+            return CaptureFrameStore(files, if (sensorSpanMs > 0L) sensorSpanMs else wallSpanMs)
+        } catch (e: Exception) {
+            files.forEach { file -> runCatching { file.delete() } }
+            throw e
+        }
+    }
+
+    private suspend fun averageGrayFromStore(store: CaptureFrameStore): GrayImage =
         withContext(Dispatchers.Default) {
-            ImageOps.average(frames.map { ImageOps.decodeLinearGray(it) })
+            var width = 0
+            var height = 0
+            var acc: FloatArray? = null
+            for (file in store.files) {
+                val img = ImageOps.decodeLinearGray(readCaptureFrame(file))
+                if (acc == null) {
+                    width = img.w
+                    height = img.h
+                    acc = FloatArray(img.data.size)
+                } else {
+                    require(img.w == width && img.h == height) { "프레임 크기 불일치" }
+                }
+                val dst = acc!!
+                for (i in dst.indices) dst[i] += img.data[i]
+            }
+            val dst = acc ?: throw IllegalStateException("프레임 없음")
+            val n = store.files.size.toFloat()
+            for (i in dst.indices) dst[i] /= n
+            GrayImage(width, height, dst)
         }
 
-    private suspend fun decodeAveragedRgb(frames: List<CaptureFrame>): RgbImage =
+    private suspend fun averageRgbFromStore(store: CaptureFrameStore): RgbImage =
         withContext(Dispatchers.Default) {
-            ImageOps.averageRgb(frames.map { ImageOps.decodeLinearRgb(it) })
-        }
-
-    private suspend fun decodeGrayFrames(frames: List<CaptureFrame>): List<GrayImage> =
-        withContext(Dispatchers.Default) {
-            frames.map { ImageOps.decodeLinearGray(it) }
-        }
-
-    private suspend fun decodeRgbFrames(frames: List<CaptureFrame>): List<RgbImage> =
-        withContext(Dispatchers.Default) {
-            frames.map { ImageOps.decodeLinearRgb(it) }
+            var width = 0
+            var height = 0
+            var accR: FloatArray? = null
+            var accG: FloatArray? = null
+            var accB: FloatArray? = null
+            for (file in store.files) {
+                val img = ImageOps.decodeLinearRgb(readCaptureFrame(file))
+                if (accR == null) {
+                    width = img.w
+                    height = img.h
+                    accR = FloatArray(img.r.size)
+                    accG = FloatArray(img.g.size)
+                    accB = FloatArray(img.b.size)
+                } else {
+                    require(img.w == width && img.h == height) { "프레임 크기 불일치" }
+                }
+                val r = accR!!
+                val g = accG!!
+                val b = accB!!
+                for (i in r.indices) {
+                    r[i] += img.r[i]
+                    g[i] += img.g[i]
+                    b[i] += img.b[i]
+                }
+            }
+            val r = accR ?: throw IllegalStateException("프레임 없음")
+            val g = accG!!
+            val b = accB!!
+            val n = store.files.size.toFloat()
+            for (i in r.indices) {
+                r[i] /= n
+                g[i] /= n
+                b[i] /= n
+            }
+            RgbImage(width, height, r, g, b)
         }
 
     private suspend fun temporalLumaConfidence(
-        frames: List<GrayImage>,
+        frameStore: CaptureFrameStore,
         black: GrayImage?,
         h: Homography,
         screenW: Int,
@@ -1130,24 +1259,30 @@ class MeasurementActivity : Activity() {
         gh: Int,
     ): FloatArray =
         withContext(Dispatchers.Default) {
-            if (frames.size < 2) return@withContext FloatArray(gw * gh) { 1f }
-            val (tw, th) = stabilityGridSize(gw, gh)
-            val grids = frames.map { frame ->
-                Analyzer.lumaGrid(frame, black, h, screenW, screenH, tw, th)
+            try {
+                if (frameStore.files.size < 2) return@withContext FloatArray(gw * gh) { 1f }
+                val (tw, th) = stabilityGridSize(gw, gh)
+                val grids = ArrayList<FloatArray>(frameStore.files.size)
+                for (file in frameStore.files) {
+                    val frame = ImageOps.decodeLinearGray(readCaptureFrame(file))
+                    grids += Analyzer.lumaGrid(frame, black, h, screenW, screenH, tw, th)
+                }
+                Analyzer.temporalStabilityConfidence(
+                    grids,
+                    tw,
+                    th,
+                    gw,
+                    gh,
+                    FLICKER_OK_RELATIVE_RANGE,
+                    FLICKER_ZERO_RELATIVE_RANGE,
+                )
+            } finally {
+                frameStore.delete()
             }
-            Analyzer.temporalStabilityConfidence(
-                grids,
-                tw,
-                th,
-                gw,
-                gh,
-                FLICKER_OK_RELATIVE_RANGE,
-                FLICKER_ZERO_RELATIVE_RANGE,
-            )
         }
 
     private suspend fun temporalChannelConfidence(
-        frames: List<RgbImage>,
+        frameStore: CaptureFrameStore,
         black: RgbImage?,
         channel: Int,
         h: Homography,
@@ -1157,20 +1292,26 @@ class MeasurementActivity : Activity() {
         gh: Int,
     ): FloatArray =
         withContext(Dispatchers.Default) {
-            if (frames.size < 2) return@withContext FloatArray(gw * gh) { 1f }
-            val (tw, th) = stabilityGridSize(gw, gh)
-            val grids = frames.map { frame ->
-                Analyzer.channelGrid(frame, black, channel, h, screenW, screenH, tw, th)
+            try {
+                if (frameStore.files.size < 2) return@withContext FloatArray(gw * gh) { 1f }
+                val (tw, th) = stabilityGridSize(gw, gh)
+                val grids = ArrayList<FloatArray>(frameStore.files.size)
+                for (file in frameStore.files) {
+                    val frame = ImageOps.decodeLinearRgb(readCaptureFrame(file))
+                    grids += Analyzer.channelGrid(frame, black, channel, h, screenW, screenH, tw, th)
+                }
+                Analyzer.temporalStabilityConfidence(
+                    grids,
+                    tw,
+                    th,
+                    gw,
+                    gh,
+                    FLICKER_OK_RELATIVE_RANGE,
+                    FLICKER_ZERO_RELATIVE_RANGE,
+                )
+            } finally {
+                frameStore.delete()
             }
-            Analyzer.temporalStabilityConfidence(
-                grids,
-                tw,
-                th,
-                gw,
-                gh,
-                FLICKER_OK_RELATIVE_RANGE,
-                FLICKER_ZERO_RELATIVE_RANGE,
-            )
         }
 
     private fun stabilityGridSize(gw: Int, gh: Int): Pair<Int, Int> {
@@ -1180,6 +1321,58 @@ class MeasurementActivity : Activity() {
         val w = Math.max(8, Math.round(gw * scale))
         val h = Math.max(8, Math.round(gh * scale))
         return Pair(w, h)
+    }
+
+    private fun writeCaptureFrame(file: File, frame: CaptureFrame) {
+        DataOutputStream(BufferedOutputStream(file.outputStream())).use { out ->
+            out.writeInt(CAPTURE_FRAME_MAGIC)
+            out.writeInt(frame.format)
+            out.writeInt(frame.width)
+            out.writeInt(frame.height)
+            out.writeLong(frame.timestampNs)
+            out.writeBoolean(frame.sensitivityIso != null)
+            frame.sensitivityIso?.let { out.writeInt(it) }
+            out.writeBoolean(frame.exposureTimeNs != null)
+            frame.exposureTimeNs?.let { out.writeLong(it) }
+            out.writeInt(frame.planes.size)
+            for (plane in frame.planes) {
+                out.writeInt(plane.rowStride)
+                out.writeInt(plane.pixelStride)
+                out.writeInt(plane.bytes.size)
+                out.write(plane.bytes)
+            }
+        }
+    }
+
+    private fun readCaptureFrame(file: File): CaptureFrame {
+        DataInputStream(BufferedInputStream(file.inputStream())).use { input ->
+            require(input.readInt() == CAPTURE_FRAME_MAGIC) { "capture frame cache mismatch" }
+            val format = input.readInt()
+            val width = input.readInt()
+            val height = input.readInt()
+            val timestampNs = input.readLong()
+            val iso = if (input.readBoolean()) input.readInt() else null
+            val exposure = if (input.readBoolean()) input.readLong() else null
+            val planeCount = input.readInt()
+            val planes = ArrayList<CaptureFrame.Plane>(planeCount)
+            repeat(planeCount) {
+                val rowStride = input.readInt()
+                val pixelStride = input.readInt()
+                val size = input.readInt()
+                val bytes = ByteArray(size)
+                input.readFully(bytes)
+                planes += CaptureFrame.Plane(bytes, rowStride, pixelStride)
+            }
+            return CaptureFrame(
+                format = format,
+                width = width,
+                height = height,
+                planes = planes,
+                timestampNs = timestampNs,
+                sensitivityIso = iso,
+                exposureTimeNs = exposure,
+            )
+        }
     }
 
     /** 대상 화면의 보정을 켜고 끄며 육안 비교 (보정 전/후 비교 UI의 원격 버전). */
@@ -1202,6 +1395,9 @@ class MeasurementActivity : Activity() {
     private fun pct(v: Float): String = String.format(java.util.Locale.US, "%.2f%%", v * 100)
 
     private fun fmt(v: Float): String = String.format(java.util.Locale.US, "%.4f", v)
+
+    private fun fmtSeconds(ms: Long): String =
+        String.format(java.util.Locale.US, "%.2fs", ms / 1000.0)
 
     private fun md5(bytes: ByteArray): String =
         MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { "%02x".format(it) }

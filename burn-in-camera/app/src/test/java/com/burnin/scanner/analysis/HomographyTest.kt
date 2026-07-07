@@ -74,4 +74,87 @@ class HomographyTest {
         assertTrue(Math.abs(out[0] - (30 + 125 * 1.3 + 75 * 0.08)) < 0.05)
         assertTrue(Math.abs(out[1] - (20 + 125 * 0.04 + 75 * 1.1)) < 0.05)
     }
+
+    @Test
+    fun markerDisambiguatesVerticalFlip() {
+        val screenW = 200
+        val screenH = 300
+        val targetMarker = renderMarker(screenW, screenH)
+        val flipped = FloatArray(targetMarker.data.size)
+        for (y in 0 until screenH) {
+            for (x in 0 until screenW) {
+                flipped[(screenH - 1 - y) * screenW + x] = targetMarker.data[y * screenW + x]
+            }
+        }
+        val quad = fullFrameQuad(screenW, screenH)
+        val oriented = Analyzer.buildHomographyWithMarker(
+            quad,
+            GrayImage(screenW, screenH, flipped),
+            screenW,
+            screenH,
+        )
+
+        assertNotNull(oriented)
+        assertTrue(oriented!!.mapping.label.contains("image BL"))
+        assertTrue(oriented.confidence > 0.5f)
+
+        val out = DoubleArray(2)
+        oriented.homography.map(0.0, 0.0, out)
+        assertTrue("target TL should map near image bottom, got y=${out[1]}", out[1] > screenH * 0.90)
+    }
+
+    private fun fullFrameQuad(w: Int, h: Int): ScreenDetector.Quad =
+        ScreenDetector.Quad(
+            arrayOf(
+                Vec2(0f, 0f),
+                Vec2((w - 1).toFloat(), 0f),
+                Vec2((w - 1).toFloat(), (h - 1).toFloat()),
+                Vec2(0f, (h - 1).toFloat()),
+            ),
+        )
+
+    private fun renderMarker(w: Int, h: Int): GrayImage {
+        val data = FloatArray(w * h) { 0.002f }
+        val m = minOf(w, h).toFloat()
+        val size = m * 0.10f
+        val inset = m * 0.04f
+        drawRect(data, w, h, inset, inset, inset + size, inset + size, 0.6f)
+        drawRect(data, w, h, w - inset - size, inset, w - inset, inset + size, 0.6f)
+        drawRect(data, w, h, w - inset - size, h - inset - size, w - inset, h - inset, 0.6f)
+        drawRect(data, w, h, inset, h - inset - size, inset + size, h - inset, 0.6f)
+
+        val q = size * 0.4f
+        drawRect(
+            data,
+            w,
+            h,
+            inset + q,
+            inset + q,
+            inset + size - q * 0.5f,
+            inset + size - q * 0.5f,
+            0.002f,
+        )
+        return GrayImage(w, h, data)
+    }
+
+    private fun drawRect(
+        data: FloatArray,
+        w: Int,
+        h: Int,
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float,
+        value: Float,
+    ) {
+        val x0 = Math.floor(left.toDouble()).toInt().coerceIn(0, w)
+        val y0 = Math.floor(top.toDouble()).toInt().coerceIn(0, h)
+        val x1 = Math.ceil(right.toDouble()).toInt().coerceIn(0, w)
+        val y1 = Math.ceil(bottom.toDouble()).toInt().coerceIn(0, h)
+        for (y in y0 until y1) {
+            for (x in x0 until x1) {
+                data[y * w + x] = value
+            }
+        }
+    }
 }

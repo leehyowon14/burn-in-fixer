@@ -193,6 +193,29 @@ class PipelineTest {
     }
 
     @Test
+    fun correctionPngUsesSameScreenMarginAsMeasurementGrid() {
+        val screenPixels = 1000
+        val gridCells = 100
+        val margin = Analyzer.SCREEN_SAMPLE_MARGIN
+
+        for (cell in listOf(0, 12, 50, 99)) {
+            val measuredScreenPixel =
+                (margin + (1f - 2f * margin) * (cell + 0.5f) / gridCells) * screenPixels
+            val pngGridCoord = Analyzer.gridCoordForScreenPixel(
+                measuredScreenPixel,
+                screenPixels,
+                gridCells,
+                margin,
+            )
+
+            assertTrue(
+                "PNG 좌표 역변환 불일치: cell=$cell coord=$pngGridCoord",
+                Math.abs(pngGridCoord - cell) < 1e-4f,
+            )
+        }
+    }
+
+    @Test
     fun averageGainGridsMergesRgbLowLightAttenuation() {
         val red = floatArrayOf(1f, 0.99f, 0.98f)
         val green = floatArrayOf(1f, 0.97f, 0.98f)
@@ -248,6 +271,29 @@ class PipelineTest {
 
         assertTrue("신뢰 높은 셀은 보정돼야 함: ${gain[gh / 2 * gw + 6]}", gain[gh / 2 * gw + 6] < 0.99f)
         assertTrue("신뢰 낮은 셀은 보정이 억제돼야 함: ${gain[gh / 2 * gw + 15]}", gain[gh / 2 * gw + 15] > 0.995f)
+    }
+
+    @Test
+    fun edgeRampDoesNotSuppressStatusBarRegion() {
+        val gw = 200
+        val gh = 200
+        val luma = FloatArray(gw * gh) { 1f }
+        for (y in 0 until 16) {
+            for (x in 0 until gw) {
+                luma[y * gw + x] = 1.20f
+            }
+        }
+
+        val gain = Analyzer.gainGrid(luma, gw, gh, 0.10f)
+        val centerX = gw / 2
+        val topEdge = gain[0 * gw + centerX]
+        val statusBarRegion = gain[4 * gw + centerX] // 2% from top
+
+        assertTrue("맨 가장자리는 여전히 완충되어야 함: $topEdge", topEdge > 0.98f)
+        assertTrue(
+            "상단바 영역 보정이 edge ramp에 과하게 눌림: $statusBarRegion",
+            statusBarRegion < 0.93f,
+        )
     }
 
     @Test

@@ -14,6 +14,9 @@ import java.io.ByteArrayOutputStream
  * SNR/미광/클리핑 confidence를 gain 계산에 곱해 과보정을 억제한다.
  */
 object Analyzer {
+    const val SCREEN_SAMPLE_MARGIN = 0.01f
+    const val EDGE_RAMP_FRACTION = SCREEN_SAMPLE_MARGIN
+
 
     data class Stats(
         val median: Float,
@@ -32,15 +35,36 @@ object Analyzer {
         val parallelErrorDeg: Float,
     )
 
+    data class CornerMapping(
+        val targetTlImageCorner: Int,
+        val clockwise: Boolean,
+        val label: String,
+    )
+
+    data class OrientedHomography(
+        val homography: Homography,
+        val mapping: CornerMapping,
+        val markerScore: Float,
+        val confidence: Float,
+    )
+
     /** 화면 4모서리(스크린 좌표)와 검출 사각형(이미지 좌표)로 호모그래피 생성.
      *  카메라가 90° 돌아가 있으면 가로/세로 비율로 감지해 모서리 대응을 회전시킨다. */
-    fun buildHomography(quad: ScreenDetector.Quad, screenW: Int, screenH: Int): Homography? {
+    fun buildHomography(
+        quad: ScreenDetector.Quad,
+        screenW: Int,
+        screenH: Int,
+        mapping: CornerMapping? = null,
+    ): Homography? {
         val src = arrayOf(
             Vec2(0f, 0f),
             Vec2(screenW.toFloat(), 0f),
             Vec2(screenW.toFloat(), screenH.toFloat()),
             Vec2(0f, screenH.toFloat()),
         )
+        if (mapping != null) {
+            return Homography.from4Points(src, mappedCorners(quad, mapping))
+        }
         val screenLandscape = screenW >= screenH
         val quadLandscape = quad.topLen() >= quad.sideLen()
         val dst = if (screenLandscape == quadLandscape) {
@@ -50,6 +74,37 @@ object Analyzer {
             arrayOf(quad.tr, quad.br, quad.bl, quad.tl)
         }
         return Homography.from4Points(src, dst)
+    }
+
+    /**
+     * 비대칭 marker 패턴의 좌상단 검정 inset을 이용해 타겟 화면 좌표와 카메라 이미지
+     * 좌표의 코너 대응을 결정한다. gray/dotgrid는 180°/상하 반전 배치를 구분할 수 없기 때문에
+     * 이 결과를 이후 재검출 호모그래피에도 같은 mapping으로 재사용해야 한다.
+     */
+    fun buildHomographyWithMarker(
+        quad: ScreenDetector.Quad,
+        marker: GrayImage,
+        screenW: Int,
+        screenH: Int,
+    ): OrientedHomography? {
+        val candidates = cornerMappings().mapNotNull { mapping ->
+            val h = buildHomography(quad, screenW, screenH, mapping) ?: return@mapNotNull null
+            val score = markerOrientationScore(marker, h, screenW, screenH)
+            Triple(mapping, h, score)
+        }
+        if (candidates.isEmpty()) return null
+
+        val sorted = candidates.sortedByDescending { it.third }
+        val best = sorted[0]
+        val second = sorted.getOrNull(1)?.third ?: 0f
+        if (best.third < 0.03f) return null
+        val confidence = ((best.third - second) / best.third.coerceAtLeast(1e-5f)).coerceIn(0f, 1f)
+        return OrientedHomography(
+            homography = best.second,
+            mapping = best.first,
+            markerScore = best.third,
+            confidence = confidence,
+        )
     }
 
     /**
@@ -113,7 +168,7 @@ object Analyzer {
     ): FloatArray {
         val grid = FloatArray(gw * gh)
         val out = DoubleArray(2)
-        val margin = 0.02f
+        val margin = SCREEN_SAMPLE_MARGIN
         for (gy in 0 until gh) {
             for (gx in 0 until gw) {
                 val u = (margin + (1 - 2 * margin) * (gx + 0.5f) / gw) * screenW
@@ -150,7 +205,7 @@ object Analyzer {
     ): FloatArray {
         val grid = FloatArray(gw * gh)
         val out = DoubleArray(2)
-        val margin = 0.02f
+        val margin = SCREEN_SAMPLE_MARGIN
         for (gy in 0 until gh) {
             for (gx in 0 until gw) {
                 val u = (margin + (1 - 2 * margin) * (gx + 0.5f) / gw) * screenW
@@ -449,12 +504,14 @@ object Analyzer {
         return g
     }
 
-    /** 가장자리 confidence 감쇠: 렌즈 왜곡/비네팅 잔차가 큰 바깥 5% 영역은 보정 강도를 줄인다 */
+    /** 가장자리 confidence 감쇠: 렌즈 왜곡/비네팅 잔차가 큰 맨 바깥 영역만 보정 강도를 줄인다 */
     private fun applyEdgeRamp(g: FloatArray, gw: Int, gh: Int) {
+        val rampX = (gw * EDGE_RAMP_FRACTION).coerceAtLeast(1f)
+        val rampY = (gh * EDGE_RAMP_FRACTION).coerceAtLeast(1f)
         for (y in 0 until gh) {
             for (x in 0 until gw) {
-                val ex = Math.min(x, gw - 1 - x) / (gw * 0.05f)
-                val ey = Math.min(y, gh - 1 - y) / (gh * 0.05f)
+                val ex = Math.min(x, gw - 1 - x) / rampX
+                val ey = Math.min(y, gh - 1 - y) / rampY
                 val conf = Math.min(1f, Math.min(ex, ey))
                 val i = y * gw + x
                 g[i] = 1f + (g[i] - 1f) * conf
@@ -504,6 +561,101 @@ object Analyzer {
         return (1f - (value - okAt) / (zeroAt - okAt)).coerceIn(0f, 1f)
     }
 
+    private fun cornerMappings(): List<CornerMapping> {
+        val names = arrayOf("image TL", "image TR", "image BR", "image BL")
+        val out = ArrayList<CornerMapping>(8)
+        for (start in 0..3) {
+            out += CornerMapping(start, clockwise = true, label = "target TL -> ${names[start]}, normal")
+            out += CornerMapping(start, clockwise = false, label = "target TL -> ${names[start]}, mirrored")
+        }
+        return out
+    }
+
+    private fun mappedCorners(quad: ScreenDetector.Quad, mapping: CornerMapping): Array<Vec2> {
+        val corners = arrayOf(quad.tl, quad.tr, quad.br, quad.bl)
+        val direction = if (mapping.clockwise) 1 else -1
+        return Array(4) { i ->
+            val idx = Math.floorMod(mapping.targetTlImageCorner + direction * i, 4)
+            corners[idx]
+        }
+    }
+
+    private fun markerOrientationScore(marker: GrayImage, h: Homography, screenW: Int, screenH: Int): Float {
+        val m = minOf(screenW, screenH).toFloat()
+        val size = m * 0.10f
+        val inset = m * 0.04f
+        val tlBlack = sampleScreenRect(
+            marker,
+            h,
+            inset + size * 0.48f,
+            inset + size * 0.48f,
+            inset + size * 0.72f,
+            inset + size * 0.72f,
+        )
+        val whites = floatArrayOf(
+            sampleScreenRect(
+                marker,
+                h,
+                inset + size * 0.10f,
+                inset + size * 0.10f,
+                inset + size * 0.30f,
+                inset + size * 0.30f,
+            ),
+            sampleScreenRect(
+                marker,
+                h,
+                screenW - inset - size * 0.70f,
+                inset + size * 0.30f,
+                screenW - inset - size * 0.30f,
+                inset + size * 0.70f,
+            ),
+            sampleScreenRect(
+                marker,
+                h,
+                screenW - inset - size * 0.70f,
+                screenH - inset - size * 0.70f,
+                screenW - inset - size * 0.30f,
+                screenH - inset - size * 0.30f,
+            ),
+            sampleScreenRect(
+                marker,
+                h,
+                inset + size * 0.30f,
+                screenH - inset - size * 0.70f,
+                inset + size * 0.70f,
+                screenH - inset - size * 0.30f,
+            ),
+        )
+        var whiteMean = 0f
+        for (w in whites) whiteMean += w
+        whiteMean /= whites.size
+        return (whiteMean - tlBlack).coerceAtLeast(0f)
+    }
+
+    private fun sampleScreenRect(
+        img: GrayImage,
+        h: Homography,
+        x0: Float,
+        y0: Float,
+        x1: Float,
+        y1: Float,
+        samples: Int = 5,
+    ): Float {
+        val out = DoubleArray(2)
+        var acc = 0f
+        var n = 0
+        for (yy in 0 until samples) {
+            val v = y0 + (yy + 0.5f) / samples * (y1 - y0)
+            for (xx in 0 until samples) {
+                val u = x0 + (xx + 0.5f) / samples * (x1 - x0)
+                h.map(u.toDouble(), v.toDouble(), out)
+                acc += img.bilinear(out[0].toFloat(), out[1].toFloat())
+                n++
+            }
+        }
+        return if (n == 0) 0f else acc / n
+    }
+
     private fun dist(a: Vec2, b: Vec2): Float {
         val dx = a.x - b.x
         val dy = a.y - b.y
@@ -523,24 +675,24 @@ object Analyzer {
      * gain 그리드 → 네이티브 해상도 알파 감쇠 PNG (M-FR-010).
      * 픽셀값 v = (1-gain)/maxAtt * 255  (0=보정 없음, 255=최대 감쇠), 그레이 PNG.
      */
-    fun toAlphaPng(gain: FloatArray, gw: Int, gh: Int, outW: Int, outH: Int, maxAtt: Float): ByteArray {
+    fun toAlphaPng(
+        gain: FloatArray,
+        gw: Int,
+        gh: Int,
+        outW: Int,
+        outH: Int,
+        maxAtt: Float,
+        screenMargin: Float = SCREEN_SAMPLE_MARGIN,
+    ): ByteArray {
         val pixels = IntArray(outW * outH)
-        if (gw == outW && gh == outH) {
-            for (i in pixels.indices) {
-                val v = Math.round((1f - gain[i]) / maxAtt * 255f).coerceIn(0, 255)
-                pixels[i] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
-            }
-        } else {
-            val sx = gw / outW.toFloat()
-            val sy = gh / outH.toFloat()
-            val gridImg = GrayImage(gw, gh, gain)
-            for (y in 0 until outH) {
-                val gy = (y + 0.5f) * sy - 0.5f
-                for (x in 0 until outW) {
-                    val g = gridImg.bilinear((x + 0.5f) * sx - 0.5f, gy)
-                    val v = Math.round((1f - g) / maxAtt * 255f).coerceIn(0, 255)
-                    pixels[y * outW + x] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
-                }
+        val gridImg = GrayImage(gw, gh, gain)
+        for (y in 0 until outH) {
+            val gy = gridCoordForScreenPixel(y + 0.5f, outH, gh, screenMargin)
+            for (x in 0 until outW) {
+                val gx = gridCoordForScreenPixel(x + 0.5f, outW, gw, screenMargin)
+                val g = gridImg.bilinear(gx, gy)
+                val v = Math.round((1f - g) / maxAtt * 255f).coerceIn(0, 255)
+                pixels[y * outW + x] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
             }
         }
         val bmp = Bitmap.createBitmap(pixels, outW, outH, Bitmap.Config.ARGB_8888)
@@ -563,33 +715,24 @@ object Analyzer {
         outW: Int,
         outH: Int,
         maxAtt: Float,
+        screenMargin: Float = SCREEN_SAMPLE_MARGIN,
     ): ByteArray {
         require(redGain.size == greenGain.size && redGain.size == blueGain.size) {
             "RGB gain grid size mismatch"
         }
         val pixels = IntArray(outW * outH)
-        if (gw == outW && gh == outH) {
-            for (i in pixels.indices) {
+        val rImg = GrayImage(gw, gh, redGain)
+        val gImg = GrayImage(gw, gh, greenGain)
+        val bImg = GrayImage(gw, gh, blueGain)
+        for (y in 0 until outH) {
+            val gy = gridCoordForScreenPixel(y + 0.5f, outH, gh, screenMargin)
+            for (x in 0 until outW) {
+                val gx = gridCoordForScreenPixel(x + 0.5f, outW, gw, screenMargin)
+                val i = y * outW + x
                 pixels[i] = (0xFF shl 24) or
-                    (attenuationByte(redGain[i], maxAtt) shl 16) or
-                    (attenuationByte(greenGain[i], maxAtt) shl 8) or
-                    attenuationByte(blueGain[i], maxAtt)
-            }
-        } else {
-            val sx = gw / outW.toFloat()
-            val sy = gh / outH.toFloat()
-            val rImg = GrayImage(gw, gh, redGain)
-            val gImg = GrayImage(gw, gh, greenGain)
-            val bImg = GrayImage(gw, gh, blueGain)
-            for (y in 0 until outH) {
-                val gy = (y + 0.5f) * sy - 0.5f
-                for (x in 0 until outW) {
-                    val gx = (x + 0.5f) * sx - 0.5f
-                    pixels[y * outW + x] = (0xFF shl 24) or
-                        (attenuationByte(rImg.bilinear(gx, gy), maxAtt) shl 16) or
-                        (attenuationByte(gImg.bilinear(gx, gy), maxAtt) shl 8) or
-                        attenuationByte(bImg.bilinear(gx, gy), maxAtt)
-                }
+                    (attenuationByte(rImg.bilinear(gx, gy), maxAtt) shl 16) or
+                    (attenuationByte(gImg.bilinear(gx, gy), maxAtt) shl 8) or
+                    attenuationByte(bImg.bilinear(gx, gy), maxAtt)
             }
         }
         val bmp = Bitmap.createBitmap(pixels, outW, outH, Bitmap.Config.ARGB_8888)
@@ -601,6 +744,16 @@ object Analyzer {
 
     private fun attenuationByte(gain: Float, maxAtt: Float): Int =
         Math.round((1f - gain) / maxAtt * 255f).coerceIn(0, 255)
+
+    fun gridCoordForScreenPixel(
+        pixelCenter: Float,
+        screenPixels: Int,
+        gridCells: Int,
+        screenMargin: Float = SCREEN_SAMPLE_MARGIN,
+    ): Float {
+        val usable = (1f - 2f * screenMargin).coerceAtLeast(1e-5f)
+        return ((pixelCenter / screenPixels - screenMargin) / usable) * gridCells - 0.5f
+    }
 
     /**
      * 상대 편차 히트맵 PNG (평가 시각화, M-FR-017).

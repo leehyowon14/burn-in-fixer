@@ -202,11 +202,14 @@ class CaptureController(context: Context, private val textureView: TextureView) 
     suspend fun captureFrames(count: Int, interFrameDelayMs: Long = 150): List<CaptureFrame> {
         val list = ArrayList<CaptureFrame>(count)
         repeat(count) {
-            list += withTimeout(12_000) { captureFrame() }
+            list += captureSingleFrame()
             delay(interFrameDelayMs)
         }
         return list
     }
+
+    suspend fun captureSingleFrame(): CaptureFrame =
+        withTimeout(12_000) { captureFrame() }
 
     private suspend fun captureFrame(): CaptureFrame = suspendCancellableCoroutine { cont ->
         val r = reader ?: return@suspendCancellableCoroutine cont.resumeWithException(
