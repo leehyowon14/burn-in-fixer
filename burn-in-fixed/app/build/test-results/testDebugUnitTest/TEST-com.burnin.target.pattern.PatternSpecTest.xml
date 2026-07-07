@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.burnin.target.pattern.PatternSpecTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-07-07T15:19:12.610Z" hostname="MacBook-Pro-3.local" time="0.01">
+  <properties/>
+  <testcase name="parsesRgbChannels" classname="com.burnin.target.pattern.PatternSpecTest" time="0.008"/>
+  <testcase name="parsesGrayLevels" classname="com.burnin.target.pattern.PatternSpecTest" time="0.0"/>
+  <testcase name="parsesBlackAndSpecials" classname="com.burnin.target.pattern.PatternSpecTest" time="0.0"/>
+  <testcase name="clampsAndRejects" classname="com.burnin.target.pattern.PatternSpecTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

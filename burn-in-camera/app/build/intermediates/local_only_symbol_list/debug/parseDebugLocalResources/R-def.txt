@@ -1,0 +1,15 @@
+R_DEF: Internal format may change without notice
+local
+id btnConnect
+id btnMeasure
+id btnStart
+id btnToggle
+id editIp
+id preview
+id scrollLog
+id txtLog
+id txtResult
+id txtStatus
+id txtTarget
+layout activity_main
+layout activity_measure

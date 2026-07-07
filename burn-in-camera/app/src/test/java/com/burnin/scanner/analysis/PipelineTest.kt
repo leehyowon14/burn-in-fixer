@@ -1,0 +1,234 @@
+package com.burnin.scanner.analysis
+
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * 측정 파이프라인 종단 검증 (MVP 1 성공 기준의 시뮬레이션 버전):
+ * 번인(밴드 −5%, 아이콘 −6%)이 있는 합성 화면을 가상 카메라로 촬영 →
+ * 검출 → 호모그래피 정합 → 휘도맵 → 보정맵 생성 → 보정 적용 시뮬레이션 → 재측정.
+ *
+ * 요구서 19.1: "보정 후 회색 화면 잔여 RMS 편차가 보정 전 대비 50% 이상 감소"
+ * 를 내부 영역 기준으로 검증한다.
+ */
+class PipelineTest {
+
+    private val screenW = 640
+    private val screenH = 400
+    private val camW = 500
+    private val camH = 380
+    private val left = 50
+    private val top = 40
+    private val right = 450
+    private val bottom = 340
+
+    /** 번인이 있는 화면의 위치별 발광 함수 */
+    private fun screenLum(u: Float, v: Float, gainAt: ((Float, Float) -> Float)?): Float {
+        var lum = 0.5f
+        if (v >= 160f && v < 220f) lum *= 0.95f                       // 상태바형 밴드 번인
+        if (u >= 480f && u < 520f && v >= 60f && v < 100f) lum *= 0.94f // 아이콘 번인
+        if (gainAt != null) lum *= gainAt(u, v).coerceIn(0f, 1f)
+        return lum
+    }
+
+    /** 암실 박스 안 카메라 시뮬레이션 (화면 사각형만 밝음) */
+    private fun renderCamera(gainAt: ((Float, Float) -> Float)? = null): GrayImage {
+        val data = FloatArray(camW * camH) { 0.002f }
+        for (y in top until bottom) {
+            for (x in left until right) {
+                val u = (x - left + 0.5f) / (right - left) * screenW
+                val v = (y - top + 0.5f) / (bottom - top) * screenH
+                data[y * camW + x] = screenLum(u, v, gainAt)
+            }
+        }
+        return GrayImage(camW, camH, data)
+    }
+
+    /** 가장자리 confidence ramp 바깥(내부 80%)만 잘라낸 그리드 */
+    private fun interior(grid: FloatArray, gw: Int, gh: Int): FloatArray {
+        val x0 = (gw * 0.10f).toInt()
+        val x1 = (gw * 0.90f).toInt()
+        val y0 = (gh * 0.10f).toInt()
+        val y1 = (gh * 0.90f).toInt()
+        val out = FloatArray((x1 - x0) * (y1 - y0))
+        var i = 0
+        for (y in y0 until y1) for (x in x0 until x1) out[i++] = grid[y * gw + x]
+        return out
+    }
+
+    @Test
+    fun endToEndCorrectionImprovesUniformity() {
+        val gw = 96
+        val gh = 60
+        val maxAtt = 0.05f
+
+        // 1. 보정 전 측정
+        val before = renderCamera()
+        val det = ScreenDetector.detect(before)
+        assertNotNull("합성 화면 검출 실패", det)
+        assertTrue("프레임 점유율 이상: ${det!!.areaRatio}", det.areaRatio in 0.4f..0.9f)
+
+        val h = Analyzer.buildHomography(det.quad, screenW, screenH)
+        assertNotNull(h)
+
+        val lumaBefore = Analyzer.lumaGrid(before, null, h!!, screenW, screenH, gw, gh)
+        val statsBefore = Analyzer.stats(lumaBefore)
+        val intBefore = Analyzer.stats(interior(lumaBefore, gw, gh))
+        assertTrue("5% 번인이 감지돼야 함 (rms=${intBefore.rmsDev})", intBefore.rmsDev > 0.008f)
+
+        // 2. 보정맵 생성
+        val gain = Analyzer.gainGrid(lumaBefore, gw, gh, maxAtt)
+        for (g in gain) assertTrue("gain 범위 위반: $g", g in (1f - maxAtt - 1e-4f)..(1f + 1e-4f))
+
+        // 3. 보정 적용 시뮬레이션: 분석 그리드 좌표계의 역사상으로 화면에 gain 적용
+        val gridImg = GrayImage(gw, gh, gain)
+        val margin = 0.02f
+        val gainAt = { u: Float, v: Float ->
+            val gx = ((u / screenW - margin) / (1 - 2 * margin)) * gw - 0.5f
+            val gy = ((v / screenH - margin) / (1 - 2 * margin)) * gh - 0.5f
+            gridImg.bilinear(gx, gy)
+        }
+
+        // 4. 보정 후 재측정 (동일 호모그래피)
+        val after = renderCamera(gainAt)
+        val lumaAfter = Analyzer.lumaGrid(after, null, h, screenW, screenH, gw, gh)
+        val statsAfter = Analyzer.stats(lumaAfter)
+        val intAfter = Analyzer.stats(interior(lumaAfter, gw, gh))
+
+        // 내부 영역: 잔여 RMS 60% 이상 감소 (요구서 기준 50% 이상)
+        assertTrue(
+            "내부 개선 부족: before=${intBefore.rmsDev} after=${intAfter.rmsDev}",
+            intAfter.rmsDev < intBefore.rmsDev * 0.4f,
+        )
+        // 전체 화면 기준으로도 악화되지 않아야 함 (가장자리 ramp 비용 포함)
+        assertTrue(
+            "전체 화면 악화: before=${statsBefore.rmsDev} after=${statsAfter.rmsDev}",
+            statsAfter.rmsDev <= statsBefore.rmsDev,
+        )
+        // 예상 밝기 손실이 maxAttenuation 이내
+        var mean = 0.0
+        for (g in gain) mean += g.toDouble()
+        val loss = 1.0 - mean / gain.size
+        assertTrue("밝기 손실 $loss > $maxAtt", loss <= maxAtt + 1e-4)
+    }
+
+    /** 반복 보정(M-FR-012): 언더슈트 상태에서 시작해도 damping 반복으로 잔여 오차가 수렴해야 한다 */
+    @Test
+    fun iterativeRefinementConverges() {
+        val gw = 96
+        val gh = 60
+        val maxAtt = 0.05f
+        val margin = 0.02f
+
+        val before = renderCamera()
+        val det = ScreenDetector.detect(before)!!
+        val h = Analyzer.buildHomography(det.quad, screenW, screenH)!!
+        val lumaBefore = Analyzer.lumaGrid(before, null, h, screenW, screenH, gw, gh)
+        val target = Analyzer.stats(lumaBefore).p10
+
+        // 초기 맵을 의도적으로 절반만 보정된 상태로 약화 (첫 보정이 부족했던 상황)
+        val full = Analyzer.gainGrid(lumaBefore, gw, gh, maxAtt)
+        var gain = FloatArray(full.size) { 1f + (full[it] - 1f) * 0.5f }
+
+        fun measure(g: FloatArray): FloatArray {
+            val gi = GrayImage(gw, gh, g)
+            val cam = renderCamera { u, v ->
+                gi.bilinear(
+                    ((u / screenW - margin) / (1 - 2 * margin)) * gw - 0.5f,
+                    ((v / screenH - margin) / (1 - 2 * margin)) * gh - 0.5f,
+                )
+            }
+            return Analyzer.lumaGrid(cam, null, h, screenW, screenH, gw, gh)
+        }
+
+        val rmsHistory = ArrayList<Float>()
+        rmsHistory += Analyzer.stats(interior(measure(gain), gw, gh)).rmsDev
+        repeat(6) {
+            val measured = measure(gain)
+            gain = Analyzer.refineGain(gain, measured, target, 0.3f, gw, gh, maxAtt)
+            rmsHistory += Analyzer.stats(interior(measure(gain), gw, gh)).rmsDev
+        }
+
+        // 단조 감소하며, 초기 언더슈트 대비 45% 이상 개선 (블러/샘플링에 의한 수렴 하한 감안)
+        assertTrue("수렴 실패: $rmsHistory", rmsHistory.last() < rmsHistory.first() * 0.55f)
+        assertTrue("잔여 RMS 절대값 과대: $rmsHistory", rmsHistory.last() < 0.008f)
+        assertTrue(
+            "중간에 발산: $rmsHistory",
+            rmsHistory.zipWithNext().all { (a, b) -> b < a * 1.05f },
+        )
+        // gain 값 범위 유지
+        for (g in gain) assertTrue("gain 범위 위반: $g", g in (1f - maxAtt - 1e-4f)..(1f + 1e-4f))
+    }
+
+    @Test
+    fun lowLightGainMixContributesToCorrection() {
+        val primary = floatArrayOf(1f, 0.98f, 0.97f, 1f)
+        val lowLight = floatArrayOf(1f, 0.95f, 0.96f, 1f)
+
+        val mixed = Analyzer.mixGainGrids(primary, lowLight, 0.35f, 0.05f)
+
+        assertTrue("gray30 보정량이 섞여야 함: ${mixed[1]}", mixed[1] < primary[1])
+        assertTrue("gray30만큼 과격하게 따라가면 안 됨: ${mixed[1]}", mixed[1] > lowLight[1])
+        assertTrue("gain 범위 위반: ${mixed[1]}", mixed[1] in 0.95f..1f)
+    }
+
+    @Test
+    fun geometryQualityIsLowForUndistortedQuad() {
+        val quad = ScreenDetector.Quad(
+            arrayOf(
+                Vec2(0f, 0f),
+                Vec2(screenW.toFloat(), 0f),
+                Vec2(screenW.toFloat(), screenH.toFloat()),
+                Vec2(0f, screenH.toFloat()),
+            ),
+        )
+
+        val quality = Analyzer.geometryQuality(quad, screenW, screenH)
+
+        assertTrue("정상 사각형 기하 점수가 높음: $quality", quality.score < 0.001f)
+        assertTrue("평행 오차가 없어야 함: $quality", Math.abs(quality.parallelErrorDeg) < 0.001f)
+    }
+
+    @Test
+    fun homographyAlignsScreenCoordinates() {
+        val before = renderCamera()
+        val det = ScreenDetector.detect(before)!!
+        val h = Analyzer.buildHomography(det.quad, screenW, screenH)!!
+        val out = DoubleArray(2)
+
+        h.map(0.0, 0.0, out)
+        assertTrue("TL 오차: (${out[0]}, ${out[1]})", Math.abs(out[0] - left) < 3 && Math.abs(out[1] - top) < 3)
+
+        h.map(screenW.toDouble(), screenH.toDouble(), out)
+        assertTrue("BR 오차: (${out[0]}, ${out[1]})", Math.abs(out[0] - right) < 3 && Math.abs(out[1] - bottom) < 3)
+
+        h.map(screenW / 2.0, screenH / 2.0, out)
+        assertTrue(
+            "중앙 오차: (${out[0]}, ${out[1]})",
+            Math.abs(out[0] - (left + right) / 2.0) < 3 && Math.abs(out[1] - (top + bottom) / 2.0) < 3,
+        )
+    }
+
+    /** 세로 화면(가로<세로) 대상 기기 + 가로로 놓인 카메라: 90° 회전 대응 확인 */
+    @Test
+    fun rotatedCameraStillBuildsHomography() {
+        // 화면은 400x640 (세로), 카메라에는 가로로 긴 사각형으로 찍힘
+        val det = ScreenDetector.detect(renderCamera())!!
+        val h = Analyzer.buildHomography(det.quad, 400, 640)
+        assertNotNull(h)
+        val out = DoubleArray(2)
+        // 화면 (0,0) → 사각형의 어느 모서리든 3px 내에 사상되어야 한다
+        h!!.map(0.0, 0.0, out)
+        val corners = listOf(
+            doubleArrayOf(left.toDouble(), top.toDouble()),
+            doubleArrayOf(right.toDouble(), top.toDouble()),
+            doubleArrayOf(right.toDouble(), bottom.toDouble()),
+            doubleArrayOf(left.toDouble(), bottom.toDouble()),
+        )
+        assertTrue(
+            "회전 대응 실패: (${out[0]}, ${out[1]})",
+            corners.any { Math.abs(it[0] - out[0]) < 3 && Math.abs(it[1] - out[1]) < 3 },
+        )
+    }
+}

@@ -1,0 +1,14 @@
+R_DEF: Internal format may change without notice
+local
+id btnOverlayOff
+id btnOverlayOn
+id btnPattern
+id btnPreview
+id scrollLog
+id seekStrength
+id txtIp
+id txtLog
+id txtProfile
+id txtStatus
+id txtStrength
+layout activity_main

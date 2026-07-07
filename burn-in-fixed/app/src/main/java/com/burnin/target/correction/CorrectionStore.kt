@@ -1,0 +1,174 @@
+package com.burnin.target.correction
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Color
+import android.graphics.Point
+import android.util.Base64
+import android.view.WindowManager
+import com.burnin.target.util.AppLog
+import org.json.JSONObject
+import java.io.File
+import java.security.MessageDigest
+
+/**
+ * 보정 프로파일 저장소 + 검증기 (T-FR-006/007, 13장 데이터 포맷).
+ *
+ * 보정맵 PNG: 그레이스케일. 픽셀값 v(0~255)의 의미는 v/255 * maxAttenuation 만큼
+ * 해당 위치의 밝기를 낮춘다는 뜻 (0 = 보정 없음, 255 = 최대 감쇠).
+ * 적용을 위해 "검정 RGB + 알파 = v/255 * maxAttenuation" 인 ARGB 비트맵으로 굽는다(bake).
+ */
+object CorrectionStore {
+
+    data class Meta(
+        val width: Int,
+        val height: Int,
+        val maxAttenuation: Double,
+        val defaultStrengthPct: Int,
+        val checksumMd5: String,
+        val createdAt: String,
+        val sourceDevice: String,
+    ) {
+        fun toJson(): JSONObject = JSONObject()
+            .put("profileVersion", 1)
+            .put("width", width)
+            .put("height", height)
+            .put("maxAttenuation", maxAttenuation)
+            .put("defaultStrengthPct", defaultStrengthPct)
+            .put("checksumMd5", checksumMd5)
+            .put("createdAt", createdAt)
+            .put("sourceDevice", sourceDevice)
+
+        companion object {
+            fun fromJson(o: JSONObject) = Meta(
+                width = o.getInt("width"),
+                height = o.getInt("height"),
+                maxAttenuation = o.getDouble("maxAttenuation"),
+                defaultStrengthPct = o.optInt("defaultStrengthPct", 100),
+                checksumMd5 = o.optString("checksumMd5", ""),
+                createdAt = o.optString("createdAt", ""),
+                sourceDevice = o.optString("sourceDevice", ""),
+            )
+        }
+    }
+
+    @Volatile var meta: Meta? = null
+        private set
+    @Volatile var bakedBitmap: Bitmap? = null
+        private set
+
+    private fun dir(context: Context): File =
+        File(context.filesDir, "profiles/current").apply { mkdirs() }
+
+    fun md5(bytes: ByteArray): String =
+        MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    fun realScreenSize(context: Context): Point {
+        val wm = context.getSystemService(WindowManager::class.java)
+        val p = Point()
+        @Suppress("DEPRECATION")
+        wm.defaultDisplay.getRealSize(p)
+        return p
+    }
+
+    /**
+     * base64 PNG 보정맵을 검증 후 저장·적재한다.
+     * 반환값: null = 성공, 문자열 = 거부 사유 (검증 실패 시 적용하지 않는다. T-FR-007)
+     */
+    fun applyFromBase64(
+        context: Context,
+        width: Int,
+        height: Int,
+        maxAttenuation: Double,
+        defaultStrengthPct: Int,
+        checksumMd5: String,
+        dataBase64: String,
+        sourceDevice: String,
+    ): String? {
+        val png: ByteArray = try {
+            Base64.decode(dataBase64, Base64.DEFAULT)
+        } catch (e: Exception) {
+            return "base64 디코드 실패"
+        }
+
+        if (checksumMd5.isNotEmpty() && !md5(png).equals(checksumMd5, ignoreCase = true)) {
+            return "체크섬 불일치 (파일 손상)"
+        }
+        if (maxAttenuation !in 0.0..0.30) {
+            return "maxAttenuation 범위 오류: $maxAttenuation (허용 0~0.30)"
+        }
+
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(png, 0, png.size, opts)
+        if (opts.outWidth != width || opts.outHeight != height) {
+            return "PNG 크기(${opts.outWidth}x${opts.outHeight})가 메타데이터(${width}x${height})와 다름"
+        }
+
+        val screen = realScreenSize(context)
+        if (!(screen.x == width && screen.y == height)) {
+            return if (screen.x == height && screen.y == width) {
+                "화면 방향 불일치: 화면 ${screen.x}x${screen.y}, 보정맵 ${width}x${height} (기기 방향을 측정 시와 동일하게 하세요)"
+            } else {
+                "해상도 불일치: 화면 ${screen.x}x${screen.y}, 보정맵 ${width}x${height}"
+            }
+        }
+
+        val src = BitmapFactory.decodeByteArray(png, 0, png.size)
+            ?: return "PNG 디코드 실패"
+
+        val baked = bake(src, maxAttenuation)
+        src.recycle()
+
+        val d = dir(context)
+        File(d, "correction_alpha.png").writeBytes(png)
+        val m = Meta(
+            width, height, maxAttenuation, defaultStrengthPct, checksumMd5,
+            createdAt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ", java.util.Locale.US)
+                .format(java.util.Date()),
+            sourceDevice = sourceDevice,
+        )
+        File(d, "metadata.json").writeText(m.toJson().toString(2))
+
+        bakedBitmap?.recycle()
+        meta = m
+        bakedBitmap = baked
+        AppLog.i("보정맵 적용 준비 완료: ${width}x${height}, maxAtt=$maxAttenuation")
+        return null
+    }
+
+    /** 그레이 PNG(감쇠 비율) → 검정+알파 ARGB 비트맵 */
+    private fun bake(src: Bitmap, maxAttenuation: Double): Bitmap {
+        val w = src.width
+        val h = src.height
+        val pixels = IntArray(w * h)
+        src.getPixels(pixels, 0, w, 0, 0, w, h)
+        val lut = IntArray(256) { v -> Math.round(v * maxAttenuation).toInt().coerceIn(0, 255) shl 24 }
+        for (i in pixels.indices) {
+            pixels[i] = lut[Color.red(pixels[i])]
+        }
+        return Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888)
+    }
+
+    /** 앱 재시작 시 저장된 프로파일을 다시 적재한다. */
+    fun loadFromDisk(context: Context): Boolean {
+        return try {
+            val d = dir(context)
+            val metaFile = File(d, "metadata.json")
+            val pngFile = File(d, "correction_alpha.png")
+            if (!metaFile.exists() || !pngFile.exists()) return false
+            val m = Meta.fromJson(JSONObject(metaFile.readText()))
+            val src = BitmapFactory.decodeFile(pngFile.absolutePath) ?: return false
+            val baked = bake(src, m.maxAttenuation)
+            src.recycle()
+            bakedBitmap?.recycle()
+            meta = m
+            bakedBitmap = baked
+            AppLog.i("저장된 보정 프로파일 적재: ${m.width}x${m.height}")
+            true
+        } catch (e: Exception) {
+            AppLog.i("프로파일 적재 실패: ${e.message}")
+            false
+        }
+    }
+}
