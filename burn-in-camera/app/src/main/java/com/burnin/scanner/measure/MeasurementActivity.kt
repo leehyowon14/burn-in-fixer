@@ -22,6 +22,7 @@ import com.burnin.scanner.analysis.ImageOps
 import com.burnin.scanner.analysis.RgbImage
 import com.burnin.scanner.analysis.ScreenDetector
 import com.burnin.scanner.camera.CameraEnumerator
+import com.burnin.scanner.camera.CaptureFrameCodec
 import com.burnin.scanner.camera.CaptureController
 import com.burnin.scanner.camera.CaptureFrame
 import com.burnin.scanner.net.ControlClient
@@ -40,10 +41,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
-import java.io.DataInputStream
-import java.io.DataOutputStream
 import java.io.File
 import java.security.MessageDigest
 
@@ -95,7 +92,6 @@ class MeasurementActivity : Activity() {
         // 같은 위상(같은 위치)에 반복되어 평균화로 상쇄되지 않았다. 주기의 정수배가 아닌
         // 오프셋을 프레임마다 더해 밴드 위상을 흩뜨린다.
         private val FLICKER_PHASE_JITTER_MS = longArrayOf(0, 7, 23, 41, 11)
-        private const val CAPTURE_FRAME_MAGIC = 0x42494631 // BIF1
         private val RGB70_PATTERNS = listOf("red70", "green70", "blue70")
         private val RGB30_PATTERNS = listOf("red30", "green30", "blue30")
     }
@@ -1595,8 +1591,8 @@ class MeasurementActivity : Activity() {
                     lastTimestampNs = frame.timestampNs
                 }
                 val file = File.createTempFile("capture_${System.nanoTime()}_", ".bin", cacheDir)
-                writeCaptureFrame(file, frame)
                 files += file
+                writeCaptureFrame(file, frame)
                 if (index != frameCount - 1) {
                     delay(interFrameDelayMs + FLICKER_PHASE_JITTER_MS[index % FLICKER_PHASE_JITTER_MS.size])
                 }
@@ -1637,8 +1633,8 @@ class MeasurementActivity : Activity() {
                     val file = File.createTempFile(
                         "capture_${role}_${System.nanoTime()}_", ".bin", cacheDir,
                     )
-                    writeCaptureFrame(file, frame)
                     filesByRole.getOrPut(role) { ArrayList() } += file
+                    writeCaptureFrame(file, frame)
                 }
                 if (index != frameCount - 1) {
                     delay(
@@ -2046,57 +2042,8 @@ class MeasurementActivity : Activity() {
         return Pair(w, h)
     }
 
-    private fun writeCaptureFrame(file: File, frame: CaptureFrame) {
-        DataOutputStream(BufferedOutputStream(file.outputStream())).use { out ->
-            out.writeInt(CAPTURE_FRAME_MAGIC)
-            out.writeInt(frame.format)
-            out.writeInt(frame.width)
-            out.writeInt(frame.height)
-            out.writeLong(frame.timestampNs)
-            out.writeBoolean(frame.sensitivityIso != null)
-            frame.sensitivityIso?.let { out.writeInt(it) }
-            out.writeBoolean(frame.exposureTimeNs != null)
-            frame.exposureTimeNs?.let { out.writeLong(it) }
-            out.writeInt(frame.planes.size)
-            for (plane in frame.planes) {
-                out.writeInt(plane.rowStride)
-                out.writeInt(plane.pixelStride)
-                out.writeInt(plane.bytes.size)
-                out.write(plane.bytes)
-            }
-        }
-    }
-
-    private fun readCaptureFrame(file: File): CaptureFrame {
-        DataInputStream(BufferedInputStream(file.inputStream())).use { input ->
-            require(input.readInt() == CAPTURE_FRAME_MAGIC) { "capture frame cache mismatch" }
-            val format = input.readInt()
-            val width = input.readInt()
-            val height = input.readInt()
-            val timestampNs = input.readLong()
-            val iso = if (input.readBoolean()) input.readInt() else null
-            val exposure = if (input.readBoolean()) input.readLong() else null
-            val planeCount = input.readInt()
-            val planes = ArrayList<CaptureFrame.Plane>(planeCount)
-            repeat(planeCount) {
-                val rowStride = input.readInt()
-                val pixelStride = input.readInt()
-                val size = input.readInt()
-                val bytes = ByteArray(size)
-                input.readFully(bytes)
-                planes += CaptureFrame.Plane(bytes, rowStride, pixelStride)
-            }
-            return CaptureFrame(
-                format = format,
-                width = width,
-                height = height,
-                planes = planes,
-                timestampNs = timestampNs,
-                sensitivityIso = iso,
-                exposureTimeNs = exposure,
-            )
-        }
-    }
+    private fun writeCaptureFrame(file: File, frame: CaptureFrame) = CaptureFrameCodec.write(file, frame)
+    private fun readCaptureFrame(file: File): CaptureFrame = CaptureFrameCodec.read(file)
 
     /** 대상 화면의 보정을 켜고 끄며 육안 비교 (보정 전/후 비교 UI의 원격 버전). */
     private fun toggleCorrection() {
