@@ -59,7 +59,7 @@ class CorrectionStoreTest {
         assertFalse(File(context.filesDir,"profiles/current/correction_rgb.png").exists())
         assertTrue(CorrectionStore.loadFromDisk(context));assertNull(CorrectionStore.rgbAttenuationBitmap)
     }
-    @Test fun missingRgbAndInterruptedWriteAreRejectedWithoutReplacingActiveBitmap() {
+    @Test fun missingRgbDoesNotReplaceActiveBitmap() {
         assertNull(apply(rgb=png(Color.RED)));val old=CorrectionStore.bakedBitmap
         File(context.filesDir,"profiles/current/correction_rgb.png").delete()
         assertFalse(CorrectionStore.loadFromDisk(context));assertSame(old,CorrectionStore.bakedBitmap)
