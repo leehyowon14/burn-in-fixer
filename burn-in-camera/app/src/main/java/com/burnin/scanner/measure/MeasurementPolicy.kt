@@ -1,6 +1,7 @@
 package com.burnin.scanner.measure
 
 import com.burnin.scanner.analysis.Analyzer
+import com.burnin.scanner.analysis.ScreenDetector
 
 internal object MeasurementPolicy {
     fun score(stats: Analyzer.Stats, rmsLimit: Float, p95Limit: Float): Float {
@@ -9,6 +10,11 @@ internal object MeasurementPolicy {
             !stats.rmsDev.isFinite() || stats.rmsDev < 0f || !stats.p95Dev.isFinite() || stats.p95Dev < 0f) return Float.POSITIVE_INFINITY
         return maxOf(stats.rmsDev / rmsLimit, stats.p95Dev / p95Limit)
     }
+
+    fun geometryStable(reference: ScreenDetector.Quad, current: ScreenDetector.Quad, tolerancePx: Float = 4f): Boolean =
+        reference.corners.zip(current.corners).all { (a, b) ->
+            Math.hypot((a.x - b.x).toDouble(), (a.y - b.y).toDouble()) <= tolerancePx
+        }
 
     /** A perfect baseline has no relative improvement; keep the report finite and deterministic. */
     fun improvement(before: Float, after: Float): Double {

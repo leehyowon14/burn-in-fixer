@@ -33,4 +33,13 @@ class MeasurementPolicyTest {
         assertFalse(selection.consider(floatArrayOf(.9f),1.5f));assertFalse(selection.isBaseline)
         assertEquals(.95f,selection.gain[0],0f)
     }
+    @Test fun movementCheckIncludesEveryCornerAndEuclideanDistance() {
+        fun quad(dx:Float,dy:Float)=com.burnin.scanner.analysis.ScreenDetector.Quad(arrayOf(
+            com.burnin.scanner.analysis.Vec2(0f,0f),com.burnin.scanner.analysis.Vec2(100f,0f),
+            com.burnin.scanner.analysis.Vec2(100f+dx,100f+dy),com.burnin.scanner.analysis.Vec2(0f,100f)))
+        assertTrue(MeasurementPolicy.geometryStable(quad(0f,0f),quad(4f,0f)))
+        assertFalse(MeasurementPolicy.geometryStable(quad(0f,0f),quad(3f,3f)))
+        assertFalse(MeasurementPolicy.geometryStable(quad(0f,0f),quad(Float.NaN,0f)))
+    }
+
 }

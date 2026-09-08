@@ -637,7 +637,7 @@ class MeasurementActivity : Activity() {
             cap = cap,
             blackAvg = blackAvg,
             blackRgbAvg = blackRgbAvg,
-            homography = homography,
+            referenceQuad = det.quad,
             cornerMapping = cornerMapping,
             screenW = screenW,
             screenH = screenH,
@@ -832,13 +832,9 @@ class MeasurementActivity : Activity() {
             val afterCapture = captureGray(cap)
             val afterAvg = afterCapture.average
             val detAfter = withContext(Dispatchers.Default) { ScreenDetector.detect(afterAvg) }
-            val hAfter = detAfter?.let { Analyzer.buildHomography(it.quad, screenW, screenH, cornerMapping) }
-                ?: homography
-            if (detAfter != null) {
-                val shift = Math.abs(detAfter.quad.tl.x - det.quad.tl.x) +
-                    Math.abs(detAfter.quad.tl.y - det.quad.tl.y)
-                if (shift > 4f) log("반복 $iter: 카메라 미세 이동 ${shift.toInt()}px → 재정렬 적용")
-            }
+            checkNotNull(detAfter) { "반복 화면 검출 실패 — 재측정 필요" }
+            check(MeasurementPolicy.geometryStable(det.quad, detAfter.quad)) { "화면 이동 — black/flat-field 재측정 필요" }
+            val hAfter = checkNotNull(Analyzer.buildHomography(detAfter.quad, screenW, screenH, cornerMapping))
             val lumaAfterRaw = withContext(Dispatchers.Default) {
                 Analyzer.lumaGrid(afterAvg, blackAvg, hAfter, screenW, screenH, gw, gh)
             }
@@ -1003,7 +999,7 @@ class MeasurementActivity : Activity() {
         cap: CaptureController,
         blackAvg: GrayImage,
         blackRgbAvg: RgbImage,
-        homography: Homography,
+        referenceQuad: ScreenDetector.Quad,
         cornerMapping: Analyzer.CornerMapping?,
         screenW: Int,
         screenH: Int,
@@ -1028,6 +1024,7 @@ class MeasurementActivity : Activity() {
         val finalAvg = captureAveraged(cap)
         val detFinal = withContext(Dispatchers.Default) { ScreenDetector.detect(finalAvg) }
         checkNotNull(detFinal) { "최종 화면 검출 실패 — 평가 무효" }
+        check(MeasurementPolicy.geometryStable(referenceQuad, detFinal.quad)) { "최종 화면 이동 — black/flat-field 재측정 필요" }
         val hFinal = checkNotNull(Analyzer.buildHomography(detFinal.quad, screenW, screenH, cornerMapping)) { "최종 좌표 정합 실패" }
         val finalGridRaw = withContext(Dispatchers.Default) {
             Analyzer.lumaGrid(finalAvg, blackAvg, hFinal, screenW, screenH, gw, gh)
