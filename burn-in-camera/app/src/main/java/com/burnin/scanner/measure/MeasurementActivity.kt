@@ -143,7 +143,7 @@ class MeasurementActivity : Activity() {
     )
 
     private data class CorrectionIterations(
-        val bestGain: FloatArray,
+        val bestMap: CorrectionMap,
         val bestRms: Float,
         val bestLowRms: Float,
         val bestLowRgbRms: Float,
@@ -268,17 +268,24 @@ class MeasurementActivity : Activity() {
         measuring = true
         chkTri.isEnabled = false
         editRefresh.isEnabled = false
+        val measurementClient = Session.client
         try {
             MeasurementSessionGuard.run(onFailure = {
-                withContext(Dispatchers.IO) {
-                    Session.client?.command(Protocol.CMD_DISABLE_CORRECTION)
-                    Session.client?.command(Protocol.CMD_DISABLE_OVERLAY)
+                try {
+                    withContext(Dispatchers.IO) { MeasurementCleanup.disable(measurementClient) }
+                } catch (cleanup: MeasurementCleanup.Incomplete) {
+                    log(MeasurementCleanup.WARNING)
+                    status(MeasurementCleanup.WARNING)
+                    android.widget.Toast.makeText(applicationContext,
+                        MeasurementCleanup.WARNING, android.widget.Toast.LENGTH_LONG).show()
+                    throw cleanup
                 }
             }) { runMeasurement() }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            status("측정 실패: ${e.message}")
+            status(if (e.suppressed.any { it is MeasurementCleanup.Incomplete })
+                MeasurementCleanup.WARNING else "측정 실패: ${e.message}")
             log("!! 중단: ${e.message}")
         } finally {
             btnStart.isEnabled = true
@@ -620,7 +627,8 @@ class MeasurementActivity : Activity() {
             flatField = flatField,
             smoothRadius = smoothRadius,
         )
-        val bestGain = correction.bestGain
+        val bestMap = correction.bestMap
+        val bestGain = bestMap.gain
         val bestRms = correction.bestRms
         val bestLowRms = correction.bestLowRms
         val bestLowRgbRms = correction.bestLowRgbRms
@@ -739,11 +747,10 @@ class MeasurementActivity : Activity() {
             rgb30 = rgb30,
             finalLowRgbRms = finalLowRgbRms,
             rgb30Improvement = rgb30Improvement,
-            lowRgbWeight = lowRgbWeight,
             finalRgb30 = finalRgb30,
             rgb70 = rgb70,
             brightnessLoss = brightnessLoss,
-            bestGain = bestGain,
+            bestMap = bestMap,
             finalUniformityPassed = finalUniformityPassed,
             invalid = invalid,
             lumaBefore = lumaBefore,
@@ -803,7 +810,6 @@ class MeasurementActivity : Activity() {
         val baselineScore = maxOf(uniformityScore(statsBefore), uniformityScore(baselineLowStats)) * (1f - lowRgbWeight) +
             (if (rgb30.stats.isNotEmpty()) rgb30.meanRms / PASS_RMS else 0f) * lowRgbWeight
         val selection = MeasurementPolicy.Selection(FloatArray(gain.size) { 1f }, baselineScore)
-        var bestGain = selection.gain
         var bestRms = statsBefore.rmsDev
         var bestLowRms = baselineLowStats.rmsDev
         var bestLowRgbRms = rgb30.meanRms
@@ -824,7 +830,7 @@ class MeasurementActivity : Activity() {
         while (iter < MAX_ITERATIONS) {
             iter++
             status("7/10 반복 $iter/$MAX_ITERATIONS — 보정맵 전송·적용...")
-            applyGainMap(client, gain, gw, gh, screenW, screenH, rgb30.channelGains, lowRgbWeight)
+            applyGainMap(client, CorrectionMap(gain, rgb30.channelGains, lowRgbWeight), gw, gh, screenW, screenH)
             lastAppliedIsBest = false
 
             status("8/10 반복 $iter/$MAX_ITERATIONS — gray70/$LOW_LIGHT_PATTERN/RGB30 재촬영·평가...")
@@ -919,7 +925,6 @@ class MeasurementActivity : Activity() {
                 bestRms = st.rmsDev
                 bestLowRms = lowSt.rmsDev
                 bestLowRgbRms = rgb30AfterMeanRms
-                bestGain = selection.gain
                 lastAppliedIsBest = true
             }
 
@@ -973,15 +978,14 @@ class MeasurementActivity : Activity() {
             gain = Analyzer.limitGainByConfidence(gain, confidence70, MAX_ATTENUATION)
         }
 
+        val bestMap = selection.correctionMap(rgb30.channelGains, lowRgbWeight)
         if (!lastAppliedIsBest) {
             status("9/10 최적 반복 맵으로 롤백 적용...")
-            applyGainMap(client, bestGain, gw, gh, screenW, screenH,
-                if (selection.isBaseline) emptyMap() else rgb30.channelGains,
-                if (selection.isBaseline) 0f else lowRgbWeight)
+            applyGainMap(client, bestMap, gw, gh, screenW, screenH)
         }
 
         return CorrectionIterations(
-            bestGain = bestGain,
+            bestMap = bestMap,
             bestRms = bestRms,
             bestLowRms = bestLowRms,
             bestLowRgbRms = bestLowRgbRms,
@@ -1103,11 +1107,10 @@ class MeasurementActivity : Activity() {
         rgb30: RgbMeasurement,
         finalLowRgbRms: Float,
         rgb30Improvement: Double,
-        lowRgbWeight: Float,
         finalRgb30: RgbMeasurement,
         rgb70: RgbMeasurement,
         brightnessLoss: Double,
-        bestGain: FloatArray,
+        bestMap: CorrectionMap,
         finalUniformityPassed: Boolean,
         invalid: Boolean,
         lumaBefore: FloatArray,
@@ -1117,9 +1120,11 @@ class MeasurementActivity : Activity() {
         grayAvg: GrayImage,
     ): File {
         val bestPng = withContext(Dispatchers.Default) {
-            Analyzer.toAlphaPng(bestGain, gw, gh, screenW, screenH, MAX_ATTENUATION)
+            bestMap.alphaPng(gw, gh, screenW, screenH, MAX_ATTENUATION)
         }
-        val bestRgbPng = rgbCorrectionPng(bestGain, rgb30.channelGains, lowRgbWeight, gw, gh, screenW, screenH)
+        val bestRgbPng = withContext(Dispatchers.Default) {
+            bestMap.rgbPng(gw, gh, screenW, screenH, MAX_ATTENUATION)
+        }
         val lowIterations = floatListJson(iterLowRmsList)
         val rgb70Json = statsMapJson(rgb70.stats)
         val report = JSONObject()
@@ -1211,7 +1216,8 @@ class MeasurementActivity : Activity() {
             .put("rgb30ImprovementRatio", rgb30Improvement)
             .put("rgb30StrayRatio", rgb30.maxStrayRatio.toDouble())
             .put("rgb30SignalValid", rgb30.signalValid)
-            .put("rgb30GainWeight", lowRgbWeight.toDouble())
+            .put("rgb30GainWeight", bestMap.channelWeight.toDouble())
+            .put("baselineSelected", bestMap.isBaseline)
             .put("rgbChannelCorrectionMap", bestRgbPng != null)
             .put("estimatedBrightnessLoss", brightnessLoss)
             .put("maxAttenuation", MAX_ATTENUATION.toDouble())
@@ -1253,21 +1259,21 @@ class MeasurementActivity : Activity() {
         return dir
     }
 
-    /** gain 그리드 → 네이티브 알파 PNG → 전송 → 보정 ON → gray70 표시 유지 */
+    /** 선택한 맵 전송 후 후보 상태 적용. 무보정 후보는 기존 WB도 활성화하지 않는다. */
     private suspend fun applyGainMap(
         client: ControlClient,
-        gain: FloatArray,
+        map: CorrectionMap,
         gw: Int,
         gh: Int,
         screenW: Int,
         screenH: Int,
-        channelGains: Map<Int, FloatArray> = emptyMap(),
-        channelWeight: Float = 0f,
     ) {
         val png = withContext(Dispatchers.Default) {
-            Analyzer.toAlphaPng(gain, gw, gh, screenW, screenH, MAX_ATTENUATION)
+            map.alphaPng(gw, gh, screenW, screenH, MAX_ATTENUATION)
         }
-        val rgbPng = rgbCorrectionPng(gain, channelGains, channelWeight, gw, gh, screenW, screenH)
+        val rgbPng = withContext(Dispatchers.Default) {
+            map.rgbPng(gw, gh, screenW, screenH, MAX_ATTENUATION)
+        }
         withContext(Dispatchers.IO) {
             val request = JSONObject()
                 .put("cmd", Protocol.CMD_APPLY_MAP)
@@ -1284,32 +1290,9 @@ class MeasurementActivity : Activity() {
                     .put("rgbData", Base64.encodeToString(rgbPng, Base64.NO_WRAP))
             }
             client.request(request, timeoutMs = 120_000)
-            client.command(Protocol.CMD_ENABLE_CORRECTION, "strength" to 100)
+            client.command(if (map.isBaseline) Protocol.CMD_DISABLE_CORRECTION
+                else Protocol.CMD_ENABLE_CORRECTION, "strength" to 100)
             client.showPattern("gray70")
-        }
-    }
-
-    private suspend fun rgbCorrectionPng(
-        baseGain: FloatArray,
-        channelGains: Map<Int, FloatArray>,
-        channelWeight: Float,
-        gw: Int,
-        gh: Int,
-        screenW: Int,
-        screenH: Int,
-    ): ByteArray? {
-        if (channelGains.isEmpty() || channelWeight <= 0f) return null
-        return withContext(Dispatchers.Default) {
-            val r = channelGains[0]?.let {
-                Analyzer.mixGainGrids(baseGain, it, channelWeight, MAX_ATTENUATION)
-            } ?: baseGain
-            val g = channelGains[1]?.let {
-                Analyzer.mixGainGrids(baseGain, it, channelWeight, MAX_ATTENUATION)
-            } ?: baseGain
-            val b = channelGains[2]?.let {
-                Analyzer.mixGainGrids(baseGain, it, channelWeight, MAX_ATTENUATION)
-            } ?: baseGain
-            Analyzer.toRgbAttenuationPng(r, g, b, gw, gh, screenW, screenH, MAX_ATTENUATION)
         }
     }
 

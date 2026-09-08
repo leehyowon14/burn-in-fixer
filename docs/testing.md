@@ -2,7 +2,7 @@
 
 ## 실행
 
-JDK 17 이상, Android SDK Platform 35, Build Tools 34.0.0 및 SDK 라이선스 동의가 필요합니다. 각 앱의 Gradle 8.13 Wrapper는 배포 ZIP SHA-256을 검증합니다. 첫 실행에는 Maven/Google 의존성과 Robolectric Android 런타임을 내려받습니다.
+CI와 동일한 JDK 17, Android SDK Platform 35, Build Tools 34.0.0 및 SDK 라이선스 동의가 필요합니다. 각 앱의 Gradle 8.13 Wrapper는 배포 ZIP SHA-256을 검증합니다. 첫 실행에는 Maven/Google 의존성과 Robolectric Android 런타임을 내려받습니다.
 
 ```sh
 export ANDROID_HOME=/path/to/android-sdk
@@ -94,3 +94,11 @@ bash scripts/check.sh burn-in-fixed
 - 파일 교체는 프로파일 디렉터리 옆의 `.pending`/`.backup`을 사용합니다. 기존 `profiles/current` 및 `profiles/white_balance` 내부 형식은 유지합니다. 구버전의 체크섬 없는 프로파일도 검증 가능한 범위에서 읽고 새 저장에는 체크섬을 기록합니다.
 
 정확도·실기기 실험의 기존 제한은 [검증 상태](validation.md)를 함께 참고합니다.
+
+## PR #2 후속 보완
+
+- 최종 후보는 회색 gain과 RGB 채널 gain·혼합 비율·무보정 여부를 함께 보관합니다. 기기 전송과 리포트 PNG 생성은 동일한 후보와 인코더를 사용합니다. 무보정 선택 시 RGB 파일을 만들지 않고 `rgb30GainWeight=0`, `baselineSelected=true`를 기록합니다.
+- 무보정 후보로 롤백할 때 앱 보정을 OFF로 유지하여 저장된 화이트밸런스가 다시 켜지지 않도록 합니다. 기존 WB 프로파일 파일의 보존/복원 한계는 여전히 별도 검증 대상입니다.
+- 실패·취소 정리는 기존 연결이 폐기된 경우에도 최대 한 번 재연결하고 두 해제 명령을 각각 처리합니다. 연결과 각 응답 대기는 2초로 제한합니다. 정리 실패는 원래 오류에 보존하고 화면·Toast·로그에 대상 기기에서 직접 보정 상태를 확인하도록 안내합니다. 연결이 돌아왔다는 사실만으로 원격 정리 성공을 판단하지 않습니다.
+- 회귀 검증에는 무보정 PNG/RGB 정책, 최종 후보 배열 보존, 실제 Activity의 TCP 전송, 실패 ACK 후 재연결·두 레이어 해제, 첫 해제 실패 뒤 다음 해제 시도 및 재연결 한도 검사를 포함합니다.
+- 후속 보완 로컬 검증: JDK 17에서 Scanner **138개**, Target **32개**, 총 **170개** 테스트 통과(실패·skip 0). 두 앱 lint와 Debug APK 생성 성공. 연결된 Android 기기가 없어 실기기 검증은 수행하지 않았습니다.
