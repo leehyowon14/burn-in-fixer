@@ -50,7 +50,7 @@ class OverlayServiceTest {
         DeviceRole.set(context,Protocol.ROLE_ADJUSTMENT);ShadowSettings.setCanDrawOverlays(false)
         assertNotNull(OverlayService.requestStart(context,100))
     }
-    @Test fun stopActionAndNullMapStopWithoutStickyRestart() {
+    @Test fun stopActionStopsWithoutStickyRestart() {
         val controller=Robolectric.buildService(OverlayService::class.java).create();val service=controller.get()
         try {assertEquals(android.app.Service.START_NOT_STICKY,service.onStartCommand(Intent(OverlayService.ACTION_STOP),0,1));assertTrue(shadowOf(service).isStoppedBySelf)}
         finally {controller.destroy()}
