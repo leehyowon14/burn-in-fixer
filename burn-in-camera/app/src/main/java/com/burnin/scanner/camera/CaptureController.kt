@@ -358,15 +358,18 @@ class CaptureController(context: Context, private val textureView: TextureView) 
         )
         r.setOnImageAvailableListener({ rd ->
             val image = rd.acquireLatestImage() ?: return@setOnImageAvailableListener
-            val frame = try {
-                image.toCaptureFrame()
+            try {
+                val frame = image.toCaptureFrame()
+                if (cont.isActive) cont.resume(frame)
+            } catch (e: Exception) {
+                if (cont.isActive) cont.resumeWithException(e)
             } finally {
                 image.close()
+                rd.setOnImageAvailableListener(null, null)
             }
-            rd.setOnImageAvailableListener(null, null)
-            if (cont.isActive) cont.resume(frame)
         }, handler)
 
+        cont.invokeOnCancellation { handler.post { runCatching { r.setOnImageAvailableListener(null, null) } } }
         val req = device!!.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
             addTarget(r.surface)
             applyMeasurementControls(this)
@@ -542,7 +545,7 @@ class CaptureController(context: Context, private val textureView: TextureView) 
     ) {
         manager.openCamera(id, object : CameraDevice.StateCallback() {
             override fun onOpened(camera: CameraDevice) {
-                if (cont.isActive) cont.resume(camera)
+                CameraResourceDelivery.deliver(cont, camera) { it.close() }
             }
             override fun onDisconnected(camera: CameraDevice) {
                 camera.close()
@@ -588,9 +591,10 @@ class CaptureController(context: Context, private val textureView: TextureView) 
         suspendCancellableCoroutine { cont ->
             camera.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(s: CameraCaptureSession) {
-                    if (cont.isActive) cont.resume(s)
+                    CameraResourceDelivery.deliver(cont, s) { it.close() }
                 }
                 override fun onConfigureFailed(s: CameraCaptureSession) {
+                    s.close()
                     if (cont.isActive) cont.resumeWithException(IllegalStateException("세션 구성 실패"))
                 }
             }, handler)
@@ -658,9 +662,10 @@ class CaptureController(context: Context, private val textureView: TextureView) 
             Executor { handler.post(it) },
             object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(s: CameraCaptureSession) {
-                    if (cont.isActive) cont.resume(s)
+                    CameraResourceDelivery.deliver(cont, s) { it.close() }
                 }
                 override fun onConfigureFailed(s: CameraCaptureSession) {
+                    s.close()
                     if (cont.isActive) {
                         cont.resumeWithException(IllegalStateException("동시 3각 세션 구성 실패"))
                     }
