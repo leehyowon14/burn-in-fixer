@@ -651,8 +651,8 @@ class MeasurementActivity : Activity() {
         val finalGray70Passed = finalStatsAfter?.let { uniformityPassed(it) } == true
         val finalLowPassed = finalLowStatsAfter?.let { uniformityPassed(it) } == true
         val finalUniformityPassed = finalGray70Passed && finalLowPassed
-        val improvement = 1.0 - finalRms.toDouble() / statsBefore.rmsDev
-        val lowImprovement = 1.0 - finalLowRms.toDouble() / lowStatsBefore.rmsDev
+        val improvement = MeasurementPolicy.improvement(statsBefore.rmsDev, finalRms)
+        val lowImprovement = MeasurementPolicy.improvement(lowStatsBefore.rmsDev, finalLowRms)
         val rgb30Improvement = if (rgb30.meanRms > 0f) {
             1.0 - finalLowRgbRms.toDouble() / rgb30.meanRms.toDouble()
         } else {
@@ -783,11 +783,14 @@ class MeasurementActivity : Activity() {
                 Analyzer.mixGainGrids(grayMixedGain, rgb30Gain, lowRgbWeight, MAX_ATTENUATION)
             }
         } ?: grayMixedGain
-        var bestGain = gain
-        var bestScore = Float.MAX_VALUE
-        var bestRms = Float.MAX_VALUE
-        var bestLowRms = Float.MAX_VALUE
-        var bestLowRgbRms = Float.MAX_VALUE
+        val baselineLowStats = Analyzer.stats(lumaLowBefore)
+        val baselineScore = maxOf(uniformityScore(statsBefore), uniformityScore(baselineLowStats)) * (1f - lowRgbWeight) +
+            (if (rgb30.stats.isNotEmpty()) rgb30.meanRms / PASS_RMS else 0f) * lowRgbWeight
+        val selection = MeasurementPolicy.Selection(FloatArray(gain.size) { 1f }, baselineScore)
+        var bestGain = selection.gain
+        var bestRms = statsBefore.rmsDev
+        var bestLowRms = baselineLowStats.rmsDev
+        var bestLowRgbRms = rgb30.meanRms
         var prevScore: Float? = null
         var divergeCount = 0
         var stalledCount = 0
@@ -900,12 +903,11 @@ class MeasurementActivity : Activity() {
                     "RGB30 평균 RMS ${pct(rgb30AfterMeanRms)}, 균일도 점수 ${fmt(compositeScore)}x"
             )
 
-            if (compositeScore < bestScore - 1e-4f) {
-                bestScore = compositeScore
+            if (selection.consider(gain, compositeScore)) {
                 bestRms = st.rmsDev
                 bestLowRms = lowSt.rmsDev
                 bestLowRgbRms = rgb30AfterMeanRms
-                bestGain = gain
+                bestGain = selection.gain
                 lastAppliedIsBest = true
             }
 
@@ -958,9 +960,11 @@ class MeasurementActivity : Activity() {
             } ?: refinedGray
         }
 
-        if (!invalid && !lastAppliedIsBest) {
+        if (!lastAppliedIsBest) {
             status("9/10 최적 반복 맵으로 롤백 적용...")
-            applyGainMap(client, bestGain, gw, gh, screenW, screenH, rgb30.channelGains, lowRgbWeight)
+            applyGainMap(client, bestGain, gw, gh, screenW, screenH,
+                if (selection.isBaseline) emptyMap() else rgb30.channelGains,
+                if (selection.isBaseline) 0f else lowRgbWeight)
         }
 
         return CorrectionIterations(
@@ -1006,8 +1010,8 @@ class MeasurementActivity : Activity() {
         delay(900)
         val finalAvg = captureAveraged(cap)
         val detFinal = withContext(Dispatchers.Default) { ScreenDetector.detect(finalAvg) }
-        val hFinal = detFinal?.let { Analyzer.buildHomography(it.quad, screenW, screenH, cornerMapping) }
-            ?: homography
+        checkNotNull(detFinal) { "최종 화면 검출 실패 — 평가 무효" }
+        val hFinal = checkNotNull(Analyzer.buildHomography(detFinal.quad, screenW, screenH, cornerMapping)) { "최종 좌표 정합 실패" }
         val finalGridRaw = withContext(Dispatchers.Default) {
             Analyzer.lumaGrid(finalAvg, blackAvg, hFinal, screenW, screenH, gw, gh)
         }
@@ -1302,10 +1306,10 @@ class MeasurementActivity : Activity() {
     }
 
     private fun uniformityPassed(stats: Analyzer.Stats): Boolean =
-        stats.rmsDev <= PASS_RMS && stats.p95Dev <= PASS_P95
+        uniformityScore(stats) <= 1f
 
     private fun uniformityScore(stats: Analyzer.Stats): Float =
-        maxOf(stats.rmsDev / PASS_RMS, stats.p95Dev / PASS_P95)
+        MeasurementPolicy.score(stats, PASS_RMS, PASS_P95)
 
     private suspend fun measureRgbPatterns(
         client: ControlClient,
