@@ -427,6 +427,10 @@ object Analyzer {
         strayWarn: Float,
         clipHigh: Float = 0.92f,
     ): FloatArray {
+        require(signal.all { it.isFinite() && it >= 0f })
+        require(black == null || black.all { it.isFinite() && it >= 0f })
+        require(strayWarn.isFinite() && strayWarn > 0.03f)
+        require(clipHigh.isFinite() && clipHigh in 0f..0.994f)
         if (black != null) require(signal.size == black.size) { "black grid size mismatch" }
         val out = FloatArray(signal.size)
         for (i in signal.indices) {
@@ -450,6 +454,8 @@ object Analyzer {
     }
 
     fun combineConfidence(primary: FloatArray, secondary: FloatArray): FloatArray {
+        requireConfidence(primary)
+        requireConfidence(secondary)
         require(primary.size == secondary.size) { "confidence grid size mismatch" }
         val out = FloatArray(primary.size)
         for (i in primary.indices) out[i] = (primary[i] * secondary[i]).coerceIn(0f, 1f)
@@ -469,6 +475,10 @@ object Analyzer {
         okRelativeRange: Float,
         zeroRelativeRange: Float,
     ): FloatArray {
+        require(gridW > 0 && gridH > 0 && outW > 0 && outH > 0)
+        require(outW.toLong() * outH <= Int.MAX_VALUE)
+        require(okRelativeRange.isFinite() && zeroRelativeRange.isFinite() && okRelativeRange >= 0f && zeroRelativeRange > okRelativeRange)
+        frameGrids.forEach { requireGrid(it, gridW, gridH) }
         if (frameGrids.size < 2) return FloatArray(outW * outH) { 1f }
         val size = gridW * gridH
         for (grid in frameGrids) require(grid.size == size) { "temporal grid size mismatch" }
@@ -490,6 +500,7 @@ object Analyzer {
         }
 
         val smoothed = boxBlur(boxBlur(low, gridW, gridH), gridW, gridH)
+        for (i in smoothed.indices) smoothed[i] = smoothed[i].coerceIn(0f, 1f)
         return if (gridW == outW && gridH == outH) {
             smoothed
         } else {
@@ -516,6 +527,9 @@ object Analyzer {
         okRelativeRange: Float = 0.02f,
         zeroRelativeRange: Float = 0.06f,
     ): FloatArray {
+        require(gw > 0 && gh > 0 && gw.toLong() * gh <= Int.MAX_VALUE)
+        require(okRelativeRange.isFinite() && zeroRelativeRange.isFinite() && okRelativeRange >= 0f && zeroRelativeRange > okRelativeRange)
+        normalizedGrids.forEach { requireGrid(it, gw, gh) }
         if (normalizedGrids.size < 2) return FloatArray(gw * gh) { 1f }
         val size = gw * gh
         for (grid in normalizedGrids) require(grid.size == size) { "cross grid size mismatch" }
@@ -533,7 +547,9 @@ object Analyzer {
             val mean = (sum / normalizedGrids.size).toFloat().coerceAtLeast(1e-5f)
             out[i] = confidenceRamp((max - min) / mean, okRelativeRange, zeroRelativeRange)
         }
-        return boxBlur(boxBlur(out, gw, gh), gw, gh)
+        return boxBlur(boxBlur(out, gw, gh), gw, gh).also { values ->
+            for (i in values.indices) values[i] = values[i].coerceIn(0f, 1f)
+        }
     }
 
     fun lowConfidenceRegions(
