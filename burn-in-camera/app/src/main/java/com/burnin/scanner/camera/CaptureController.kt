@@ -337,26 +337,8 @@ class CaptureController(context: Context, private val textureView: TextureView) 
         refreshHz: Float,
         exposureRange: Range<Long>?,
         isoRange: Range<Int>?,
-    ): Pair<Long, Int> {
-        if (refreshHz < 1f || exposureNs <= 0L) return exposureNs to iso
-        val periodNs = Math.round(1e9 / refreshHz)
-        if (periodNs <= 0L) return exposureNs to iso
-
-        fun candidate(cycles: Long): Pair<Long, Int>? {
-            if (cycles < 1) return null
-            val quantized = cycles * periodNs
-            if (exposureRange != null && quantized !in exposureRange.lower..exposureRange.upper) return null
-            val compensated = Math.round(iso.toDouble() * exposureNs / quantized)
-                .toInt()
-                .coerceInRange(isoRange)
-            val brightnessRatio = compensated.toDouble() * quantized / (iso.toDouble() * exposureNs)
-            if (brightnessRatio > 1.15 || brightnessRatio < 0.85) return null
-            return quantized to compensated
-        }
-
-        val up = (exposureNs + periodNs - 1) / periodNs
-        return candidate(up) ?: candidate(exposureNs / periodNs) ?: (exposureNs to iso)
-    }
+    ): Pair<Long, Int> = ExposurePolicy.quantize(exposureNs, iso, refreshHz,
+        exposureRange?.let { it.lower..it.upper }, isoRange?.let { it.lower..it.upper })
 
     suspend fun captureFrames(count: Int, interFrameDelayMs: Long = 150): List<CaptureFrame> {
         val list = ArrayList<CaptureFrame>(count)
