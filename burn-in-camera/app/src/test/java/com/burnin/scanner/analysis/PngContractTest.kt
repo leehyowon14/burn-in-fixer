@@ -40,4 +40,12 @@ class PngContractTest {
         assertEquals(0,Color.red(b.getPixel(0,0)));assertEquals(136,Color.red(b.getPixel(1,0)));assertEquals(255,Color.red(b.getPixel(2,0)))
         b.recycle()
     }
+    @Test fun signedHeatmapUsesRedForBrightAndBlueForDark() {
+        val bytes=Analyzer.deviationHeatmapPng(floatArrayOf(.9f,1f,1.1f),3,1,.1f)
+        val b=BitmapFactory.decodeByteArray(bytes,0,bytes.size)!!
+        assertEquals(12,b.width);assertEquals(4,b.height)
+        assertEquals(Color.BLUE,b.getPixel(1,1));assertEquals(Color.BLACK,b.getPixel(5,1));assertEquals(Color.RED,b.getPixel(9,1))
+        b.recycle()
+    }
+
 }
