@@ -509,7 +509,8 @@ class MeasurementActivity : Activity() {
             lowBeforeCapture.frameStore, blackAvg, homography, screenW, screenH, gw, gh
         )
         val confidenceLow = withContext(Dispatchers.Default) {
-            Analyzer.combineConfidence(baseConfidenceLow, flickerConfidenceLow)
+            val single = Analyzer.combineConfidence(baseConfidenceLow, flickerConfidenceLow)
+            if (cross == null) single else Analyzer.combineConfidence(single, cross.agreement)
         }
         val lowStatsBefore = Analyzer.stats(lumaLowBefore)
         val lowTarget = lowStatsBefore.p10
@@ -549,7 +550,7 @@ class MeasurementActivity : Activity() {
             log("RGB70 채널 측정 건너뜀: ${e.message}")
             emptyRgbMeasurement()
         }
-        val rgb30 = try {
+        val rgb30Measured = try {
             measureRgbPatterns(
                 client, cap, blackRgbAvg, homography, screenW, screenH, gw, gh,
                 RGB30_PATTERNS, LOW_RGB_FRAMES, "deviation_rgb30_before",
@@ -562,6 +563,12 @@ class MeasurementActivity : Activity() {
             log("RGB30 채널 측정 건너뜀: ${e.message}")
             emptyRgbMeasurement()
         }
+        val rgb30 = rgb30Measured.copy(
+            channelGains = rgb30Measured.channelGains.mapValuesTo(LinkedHashMap()) { (_, gain) ->
+                Analyzer.limitGainByConfidence(gain, confidence70, MAX_ATTENUATION)
+            },
+            aggregateGain = rgb30Measured.aggregateGain?.let { Analyzer.limitGainByConfidence(it, confidence70, MAX_ATTENUATION) },
+        )
         val lowRgbWeight = when {
             rgb30.stats.isEmpty() -> 0f
             rgb30.signalValid -> LOW_RGB_GAIN_WEIGHT
@@ -791,6 +798,7 @@ class MeasurementActivity : Activity() {
                 Analyzer.mixGainGrids(grayMixedGain, rgb30Gain, lowRgbWeight, MAX_ATTENUATION)
             }
         } ?: grayMixedGain
+        gain = Analyzer.limitGainByConfidence(gain, confidence70, MAX_ATTENUATION)
         val baselineLowStats = Analyzer.stats(lumaLowBefore)
         val baselineScore = maxOf(uniformityScore(statsBefore), uniformityScore(baselineLowStats)) * (1f - lowRgbWeight) +
             (if (rgb30.stats.isNotEmpty()) rgb30.meanRms / PASS_RMS else 0f) * lowRgbWeight
@@ -966,6 +974,7 @@ class MeasurementActivity : Activity() {
                     Analyzer.mixGainGrids(refinedGray, rgbGain, lowRgbWeight, MAX_ATTENUATION)
                 }
             } ?: refinedGray
+            gain = Analyzer.limitGainByConfidence(gain, confidence70, MAX_ATTENUATION)
         }
 
         if (!lastAppliedIsBest) {

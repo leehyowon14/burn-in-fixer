@@ -792,6 +792,14 @@ object Analyzer {
      * 밝기별 gain 맵 혼합. gain 자체가 아니라 attenuation(1-gain)을 섞어
      * gray25 같은 저휘도에서만 보이는 자국도 실제 보정량에 반영한다.
      */
+    /** Reapply the persistent mask after mixing so other brightness/channel maps cannot bypass it. */
+    fun limitGainByConfidence(gain: FloatArray, confidence: FloatArray, maxAtt: Float): FloatArray {
+        require(gain.size == confidence.size && gain.all { it.isFinite() && it in 0f..1f })
+        requireConfidence(confidence)
+        requireAttenuation(maxAtt)
+        return FloatArray(gain.size) { maxOf(gain[it], 1f - maxAtt * confidence[it]) }
+    }
+
     fun mixGainGrids(
         primary: FloatArray,
         secondary: FloatArray,
