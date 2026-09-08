@@ -750,18 +750,25 @@ object Analyzer {
         confidence: FloatArray? = null,
         smoothRadius: Int = 1,
     ): FloatArray {
+        requireGrid(luma, gw, gh)
+        requireAttenuation(maxAtt)
+        require(smoothRadius >= 0)
+        requireConfidence(confidence)
         if (confidence != null) require(confidence.size == luma.size) { "confidence grid size mismatch" }
         val st = stats(luma)
         val target = st.p10
         val gain = FloatArray(luma.size)
         for (i in luma.indices) {
-            val raw = (target / luma[i]).coerceIn(1f - maxAtt, 1f)
+            val raw = (target / luma[i].coerceAtLeast(1e-5f)).coerceIn(1f - maxAtt, 1f)
             val conf = confidence?.get(i) ?: 1f
             gain[i] = (1f - (1f - raw) * conf).coerceIn(1f - maxAtt, 1f)
         }
         var g = boxBlur(gain, gw, gh, smoothRadius)
         g = boxBlur(g, gw, gh, smoothRadius)
         applyEdgeRamp(g, gw, gh)
+        for (i in g.indices) g[i] = g[i].coerceIn(1f - maxAtt, 1f)
+        // Smoothing must never turn an excluded cell into an accepted correction.
+        if (confidence != null) for (i in g.indices) if (confidence[i] == 0f) g[i] = 1f
         return g
     }
 
@@ -775,6 +782,9 @@ object Analyzer {
         secondaryWeight: Float,
         maxAtt: Float,
     ): FloatArray {
+        requireAttenuation(maxAtt)
+        require(secondaryWeight.isFinite())
+        require(primary.all { it.isFinite() } && secondary.all { it.isFinite() })
         require(primary.size == secondary.size) { "gain grid size mismatch" }
         val w = secondaryWeight.coerceIn(0f, 1f)
         val out = FloatArray(primary.size)
@@ -788,6 +798,8 @@ object Analyzer {
     }
 
     fun averageGainGrids(gains: List<FloatArray>, maxAtt: Float): FloatArray? {
+        requireAttenuation(maxAtt)
+        require(gains.all { g -> g.all { it.isFinite() } })
         if (gains.isEmpty()) return null
         val size = gains[0].size
         val out = FloatArray(size)
@@ -819,6 +831,13 @@ object Analyzer {
         confidence: FloatArray? = null,
         smoothRadius: Int = 1,
     ): FloatArray {
+        requireGrid(gain, gw, gh)
+        requireGrid(measuredAfter, gw, gh)
+        requireAttenuation(maxAtt)
+        require(target.isFinite() && target > 0f)
+        require(alpha.isFinite() && alpha in 0f..1f)
+        require(smoothRadius >= 0)
+        requireConfidence(confidence)
         if (confidence != null) require(confidence.size == gain.size) { "confidence grid size mismatch" }
         val out = FloatArray(gain.size)
         for (i in gain.indices) {
@@ -829,7 +848,22 @@ object Analyzer {
         }
         val g = boxBlur(out, gw, gh, smoothRadius)
         applyEdgeRamp(g, gw, gh)
+        for (i in g.indices) g[i] = g[i].coerceIn(1f - maxAtt, 1f)
+        if (confidence != null) for (i in g.indices) if (confidence[i] == 0f) g[i] = gain[i]
         return g
+    }
+
+    private fun requireGrid(grid: FloatArray, w: Int, h: Int) {
+        require(w > 0 && h > 0 && w.toLong() * h == grid.size.toLong()) { "grid shape mismatch" }
+        require(grid.all { it.isFinite() && it >= 0f }) { "invalid grid value" }
+    }
+
+    private fun requireAttenuation(value: Float) {
+        require(value.isFinite() && value in 0f..1f) { "invalid attenuation" }
+    }
+
+    private fun requireConfidence(values: FloatArray?) {
+        require(values == null || values.all { it.isFinite() && it in 0f..1f }) { "invalid confidence" }
     }
 
     /** 가장자리 confidence 감쇠: 렌즈 왜곡/비네팅 잔차가 큰 맨 바깥 영역만 보정 강도를 줄인다 */
