@@ -30,6 +30,7 @@ import com.burnin.scanner.net.Session
 import com.burnin.scanner.report.ReportStore
 import com.burnin.scanner.util.AppLog
 import com.burnin.scanner.vl.VisionTrustGate
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -219,8 +220,8 @@ class MeasurementActivity : Activity() {
                 capture?.close()
                 capture = null
                 val c = CaptureController(this@MeasurementActivity, findViewById<TextureView>(R.id.preview))
-                c.start(if (chkTri.isChecked) triSelection else null)
                 capture = c
+                c.start(if (chkTri.isChecked) triSelection else null)
                 status("카메라 준비 완료 — 정렬 확인 후 [측정 시작]")
                 log(
                     "카메라: ${c.captureSize.width}x${c.captureSize.height} " +
@@ -234,6 +235,9 @@ class MeasurementActivity : Activity() {
                 }
                 c.diagnosticNotes().forEach { log(it) }
             } catch (e: Exception) {
+                capture?.close()
+                capture = null
+                if (e is CancellationException) throw e
                 status("카메라 초기화 실패: ${e.message}")
                 btnStart.isEnabled = false
             }
@@ -269,7 +273,14 @@ class MeasurementActivity : Activity() {
         chkTri.isEnabled = false
         editRefresh.isEnabled = false
         try {
-            runMeasurement()
+            MeasurementSessionGuard.run(onFailure = {
+                withContext(Dispatchers.IO) {
+                    Session.client?.command(Protocol.CMD_DISABLE_CORRECTION)
+                    Session.client?.command(Protocol.CMD_DISABLE_OVERLAY)
+                }
+            }) { runMeasurement() }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             status("측정 실패: ${e.message}")
             log("!! 중단: ${e.message}")
@@ -294,6 +305,7 @@ class MeasurementActivity : Activity() {
         status("1/10 gray70 패턴 표시, 노출 수렴 중...")
         withContext(Dispatchers.IO) {
             client.command(Protocol.CMD_DISABLE_CORRECTION)
+            client.command(Protocol.CMD_DISABLE_OVERLAY)
             client.showPattern("gray70")
         }
         delay(2500)
