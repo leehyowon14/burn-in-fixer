@@ -6,22 +6,26 @@ import com.burnin.scanner.camera.CaptureFrame
 
 /** 선형 휘도(0~1) 그레이스케일 이미지. */
 class GrayImage(val w: Int, val h: Int, val data: FloatArray) {
+    init { requireImageShape(w, h, data.size) }
 
     operator fun get(x: Int, y: Int): Float = data[y * w + x]
 
     /** 이중선형 보간 샘플 (범위 밖은 가장자리 클램프) */
     fun bilinear(fx: Float, fy: Float): Float {
-        val x = fx.coerceIn(0f, w - 1.001f)
-        val y = fy.coerceIn(0f, h - 1.001f)
+        require(fx.isFinite() && fy.isFinite()) { "sample coordinates must be finite" }
+        val x = fx.coerceIn(0f, (w - 1).toFloat())
+        val y = fy.coerceIn(0f, (h - 1).toFloat())
         val x0 = x.toInt()
         val y0 = y.toInt()
         val dx = x - x0
         val dy = y - y0
+        val x1 = (x0 + 1).coerceAtMost(w - 1)
+        val y1 = (y0 + 1).coerceAtMost(h - 1)
         val i = y0 * w + x0
         val a = data[i]
-        val b = data[i + 1]
-        val c = data[i + w]
-        val d = data[i + w + 1]
+        val b = data[y0 * w + x1]
+        val c = data[y1 * w + x0]
+        val d = data[y1 * w + x1]
         return (a * (1 - dx) + b * dx) * (1 - dy) + (c * (1 - dx) + d * dx) * dy
     }
 }
@@ -34,6 +38,11 @@ class RgbImage(
     val g: FloatArray,
     val b: FloatArray,
 ) {
+    init {
+        requireImageShape(w, h, r.size)
+        require(g.size == r.size && b.size == r.size) { "RGB channel size mismatch" }
+    }
+
     fun bilinearChannel(fx: Float, fy: Float, channel: Int): Float {
         val data = when (channel) {
             0 -> r
@@ -41,17 +50,20 @@ class RgbImage(
             2 -> b
             else -> throw IllegalArgumentException("channel must be 0, 1, or 2")
         }
-        val x = fx.coerceIn(0f, w - 1.001f)
-        val y = fy.coerceIn(0f, h - 1.001f)
+        require(fx.isFinite() && fy.isFinite()) { "sample coordinates must be finite" }
+        val x = fx.coerceIn(0f, (w - 1).toFloat())
+        val y = fy.coerceIn(0f, (h - 1).toFloat())
         val x0 = x.toInt()
         val y0 = y.toInt()
         val dx = x - x0
         val dy = y - y0
+        val x1 = (x0 + 1).coerceAtMost(w - 1)
+        val y1 = (y0 + 1).coerceAtMost(h - 1)
         val i = y0 * w + x0
         val a = data[i]
-        val bb = data[i + 1]
-        val c = data[i + w]
-        val d = data[i + w + 1]
+        val bb = data[y0 * w + x1]
+        val c = data[y1 * w + x0]
+        val d = data[y1 * w + x1]
         return (a * (1 - dx) + bb * dx) * (1 - dy) + (c * (1 - dx) + d * dx) * dy
     }
 }
@@ -284,4 +296,8 @@ object ImageOps {
         }
         return RgbImage(w, h, r, g, b)
     }
+}
+
+private fun requireImageShape(w: Int, h: Int, size: Int) {
+    require(w > 0 && h > 0 && w.toLong() * h == size.toLong()) { "image size mismatch" }
 }
