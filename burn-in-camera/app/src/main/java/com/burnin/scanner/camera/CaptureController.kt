@@ -649,6 +649,7 @@ class CaptureController(context: Context, private val textureView: TextureView) 
      * 논리 멀티카메라 동시 세션: 각 출력 스트림을 setPhysicalCameraId로
      * 초광각/표준/망원 물리 카메라에 라우팅한다 (API 28+).
      */
+    @androidx.annotation.RequiresApi(28)
     private suspend fun createTriSession(
         tri: CameraEnumerator.TriSelection,
         previewSurface: Surface,
