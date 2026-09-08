@@ -77,14 +77,14 @@ object ImageOps {
         when (frame.format) {
             ImageFormat.YUV_420_888 -> decodeYuvLinearGray(frame, maxLongEdge)
             ImageFormat.JPEG -> decodeLinearGray(frame.planes[0].bytes, maxLongEdge)
-            else -> decodeLinearGray(frame.planes[0].bytes, maxLongEdge)
+            else -> throw IllegalArgumentException("지원하지 않는 이미지 형식: ${frame.format}")
         }
 
     fun decodeLinearRgb(frame: CaptureFrame, maxLongEdge: Int = 1600): RgbImage =
         when (frame.format) {
             ImageFormat.YUV_420_888 -> decodeYuvLinearRgb(frame, maxLongEdge)
             ImageFormat.JPEG -> decodeLinearRgb(frame.planes[0].bytes, maxLongEdge)
-            else -> decodeLinearRgb(frame.planes[0].bytes, maxLongEdge)
+            else -> throw IllegalArgumentException("지원하지 않는 이미지 형식: ${frame.format}")
         }
 
     /**
@@ -93,6 +93,7 @@ object ImageOps {
      * (분석 그리드가 저주파이므로 충분한 해상도)
      */
     fun decodeLinearGray(jpeg: ByteArray, maxLongEdge: Int = 1600): GrayImage {
+        require(maxLongEdge > 0) { "maxLongEdge must be positive" }
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
         var sample = 1
@@ -119,6 +120,7 @@ object ImageOps {
     }
 
     fun decodeLinearRgb(jpeg: ByteArray, maxLongEdge: Int = 1600): RgbImage {
+        require(maxLongEdge > 0) { "maxLongEdge must be positive" }
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
         var sample = 1
@@ -162,6 +164,7 @@ object ImageOps {
         val outW = Math.max(1, (frame.width + sample - 1) / sample)
         val outH = Math.max(1, (frame.height + sample - 1) / sample)
         val yPlane = frame.planes[0]
+        validatePlane(yPlane, frame.width, frame.height)
         val out = FloatArray(outW * outH)
         var i = 0
         for (oy in 0 until outH) {
@@ -199,6 +202,9 @@ object ImageOps {
         val vPlane = frame.planes[2]
         val chromaW = (frame.width + 1) / 2
         val chromaH = (frame.height + 1) / 2
+        validatePlane(yPlane, frame.width, frame.height)
+        validatePlane(uPlane, chromaW, chromaH)
+        validatePlane(vPlane, chromaW, chromaH)
         val r = FloatArray(outW * outH)
         val g = FloatArray(outW * outH)
         val b = FloatArray(outW * outH)
@@ -245,14 +251,23 @@ object ImageOps {
     }
 
     private fun yuvSample(width: Int, height: Int, maxLongEdge: Int): Int {
+        require(width > 0 && height > 0 && maxLongEdge > 0)
         var sample = 1
         while (maxOf(width, height) / (sample * 2) >= maxLongEdge) sample *= 2
         return sample
     }
 
+    private fun validatePlane(plane: CaptureFrame.Plane, width: Int, height: Int) {
+        require(plane.rowStride > 0 && plane.pixelStride > 0)
+        val rowBytes = (width - 1L) * plane.pixelStride + 1L
+        require(plane.rowStride >= rowBytes) { "overlapping plane rows" }
+        val required = (height - 1L) * plane.rowStride + rowBytes
+        require(required <= plane.bytes.size) { "truncated plane" }
+    }
+
     private fun planeByte(plane: CaptureFrame.Plane, x: Int, y: Int): Int {
         val index = y * plane.rowStride + x * plane.pixelStride
-        return plane.bytes[index.coerceIn(0, plane.bytes.size - 1)].toInt() and 0xFF
+        return plane.bytes[index].toInt() and 0xFF
     }
 
     private fun videoRangeY(y: Int): Float =
