@@ -249,8 +249,11 @@ object Analyzer {
     }
 
     fun stats(grid: FloatArray): Stats {
+        require(grid.isNotEmpty()) { "signal grid must not be empty" }
+        require(grid.all { it.isFinite() && it >= 0f }) { "signal must be finite and nonnegative" }
         val sorted = grid.clone().apply { sort() }
         val median = sorted[sorted.size / 2]
+        require(median > 0f) { "signal median must be positive" }
         val p10 = sorted[(sorted.size * 0.10f).toInt().coerceIn(0, sorted.size - 1)]
         var sumSq = 0.0
         var sum = 0.0
